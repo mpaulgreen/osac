@@ -121,8 +121,10 @@
         apply:
           tags:
             - verify
+            - never
       tags:
         - verify
+        - never
       when: ocp_4_20_ai_maas_run_verify | default(true) | bool
 
     # --- Cleanup ---

@@ -18,8 +18,8 @@
 
 - name: "{{ _t.name }} | Derive smoke (non-free) and free test tiers"
   ansible.builtin.set_fact:
-    _smoke_tier: "{{ (_t_tiers | selectattr('priority', 'greaterthan', 0) | list | first) | default(_t_tiers[0]) }}"
-    _free_tier: "{{ (_t_tiers | selectattr('priority', 'equalto', 0) | list | first) | default(_t_tiers[0]) }}"
+    _smoke_tier: "{{ (_t_tiers | json_query('[?to_number(to_string(priority)) > `0`]') | first) | default(_t_tiers[0]) }}"
+    _free_tier: "{{ (_t_tiers | json_query('[?to_number(to_string(priority)) == `0`]') | first) | default(_t_tiers[0]) }}"
 
 # =====================================================================
 # Layer 1 — control-plane readiness (cheap k8s_info; no HTTP)
