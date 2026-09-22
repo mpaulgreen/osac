@@ -17,7 +17,7 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 
-	privatev1 "github.com/osac-project/osac-metering/internal/api/osac/private/v1"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 const ClusterStatePrefix = "CLUSTER_STATE_"
@@ -93,8 +93,8 @@ func (m *clusterMapper) IsBillable() bool {
 	return IsClusterBillableState(m.CurrentState())
 }
 
-func (m *clusterMapper) BillingDimensionsMap() map[string]any {
-	return ClusterBillingDimensions(m.cl)
+func (m *clusterMapper) BillingDimensionsMap() (map[string]any, error) {
+	return ClusterBillingDimensions(m.cl), nil
 }
 
 // CaaS cluster state machine. Both PROGRESSING and READY are billable.
@@ -163,10 +163,10 @@ func (m *clusterMapper) CloudEventType(eventType privatev1.EventType, previousSt
 	return ResolveCloudEventType(clusterTransitions, eventType, previousState, m.CurrentState())
 }
 
-func (m *clusterMapper) TransitionTime(eventType privatev1.EventType) (time.Time, error) {
-	return ResolveTransitionTime(eventType,
+func (m *clusterMapper) TransitionTime(event *privatev1.Event, _ string) (time.Time, error) {
+	return ResolveTransitionTime(event.GetType(),
+		event.GetTimestamp(),
 		m.cl.GetMetadata().GetCreationTimestamp(),
-		m.cl.GetMetadata().GetDeletionTimestamp(),
 		m.cl.GetStatus().GetStateTransitionTime(),
 		m.cl.GetId())
 }
@@ -304,8 +304,30 @@ func DecomposeClusterComponents(billingDims map[string]any) ([]ComponentRecord, 
 			ReleaseImage:    releaseImage,
 		})
 	}
+	sort.Slice(records, func(i, j int) bool {
+		return componentRecordLess(records[i], records[j])
+	})
 
 	return records, nil
+}
+
+func componentRecordLess(a, b ComponentRecord) bool {
+	if a.NodeSet != b.NodeSet {
+		return a.NodeSet < b.NodeSet
+	}
+	if a.Component != b.Component {
+		return a.Component < b.Component
+	}
+	if a.HostType != b.HostType {
+		return a.HostType < b.HostType
+	}
+	if a.NodeCount != b.NodeCount {
+		return a.NodeCount < b.NodeCount
+	}
+	if a.ClusterTemplate != b.ClusterTemplate {
+		return a.ClusterTemplate < b.ClusterTemplate
+	}
+	return a.ReleaseImage < b.ReleaseImage
 }
 
 // ComponentEventID derives a deterministic CloudEvent ID for a decomposed

@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/finalizers"
 	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/annotations"
@@ -42,6 +42,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/labels"
 	"github.com/osac-project/osac/fulfillment-service/internal/masks"
 	osacv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 var _ = Describe("validateTenant", func() {
@@ -212,7 +213,7 @@ var _ = Describe("update tenant annotation", func() {
 				NodeSets: map[string]*privatev1.ClusterNodeSet{
 					"gpu.gb200": privatev1.ClusterNodeSet_builder{
 						HostType: &privatev1.HostTypeReference{Name: "gpu.gb200"},
-						Size:     5,
+						Size:     proto.Int32(5),
 					}.Build(),
 				},
 			}.Build(),
@@ -298,7 +299,7 @@ var _ = Describe("update tenant annotation", func() {
 				NodeSets: map[string]*privatev1.ClusterNodeSet{
 					"gpu.gb200": privatev1.ClusterNodeSet_builder{
 						HostType: &privatev1.HostTypeReference{Name: "gpu.gb200"},
-						Size:     5,
+						Size:     proto.Int32(5),
 					}.Build(),
 				},
 			}.Build(),
@@ -378,7 +379,7 @@ var _ = Describe("update tenant annotation", func() {
 				NodeSets: map[string]*privatev1.ClusterNodeSet{
 					"gpu.gb200": privatev1.ClusterNodeSet_builder{
 						HostType: &privatev1.HostTypeReference{Name: "gpu.gb200"},
-						Size:     5,
+						Size:     proto.Int32(5),
 					}.Build(),
 				},
 			}.Build(),
@@ -427,7 +428,6 @@ var _ = Describe("update tenant annotation", func() {
 				Client:    fakeClient,
 			}, nil)
 
-		pullSecret := "my-pull-secret"
 		sshKey := "ssh-ed25519 AAAA..."
 		versionName := "4-17-0"
 		resolvedImage := "quay.io/openshift-release-dev/ocp-release:4.17.0-multi"
@@ -457,7 +457,6 @@ var _ = Describe("update tenant annotation", func() {
 			}.Build(),
 			Spec: privatev1.ClusterSpec_builder{
 				Template:     &privatev1.ClusterTemplateReference{Name: "test-template"},
-				PullSecret:   &pullSecret,
 				SshPublicKey: &sshKey,
 				Version:      &privatev1.ClusterVersionReference{Name: versionName},
 				Network: privatev1.ClusterNetwork_builder{
@@ -491,7 +490,6 @@ var _ = Describe("update tenant annotation", func() {
 		Expect(list.Items).To(HaveLen(1))
 
 		createdCR := list.Items[0]
-		Expect(createdCR.Spec.PullSecret).To(Equal(pullSecret))
 		Expect(createdCR.Spec.SSHPublicKey).To(Equal(sshKey))
 		Expect(createdCR.Spec.ReleaseImage).To(Equal(resolvedImage))
 		Expect(createdCR.Spec.Network).ToNot(BeNil())
@@ -638,7 +636,7 @@ var _ = Describe("update tenant annotation", func() {
 				NodeSets: map[string]*privatev1.ClusterNodeSet{
 					"gpu.gb200": privatev1.ClusterNodeSet_builder{
 						HostType: &privatev1.HostTypeReference{Name: "gpu.gb200"},
-						Size:     5,
+						Size:     proto.Int32(5),
 					}.Build(),
 				},
 			}.Build(),
@@ -746,7 +744,7 @@ var _ = Describe("update tenant annotation", func() {
 				NodeSets: map[string]*privatev1.ClusterNodeSet{
 					"gpu.gb200": privatev1.ClusterNodeSet_builder{
 						HostType: &privatev1.HostTypeReference{Name: "gpu.gb200"},
-						Size:     3,
+						Size:     proto.Int32(3),
 					}.Build(),
 				},
 			}.Build(),
@@ -1809,6 +1807,7 @@ var _ = Describe("ensureClusterSecrets", func() {
 				Expect(secret.GetMetadata().GetLabels()).To(
 					HaveKeyWithValue(labels.SecretType, "cluster-kubeconfig"))
 				Expect(secret.GetBackend()).To(Equal(privatev1.SecretBackend_SECRET_BACKEND_HUB))
+				Expect(secret.GetType()).To(Equal(privatev1.SecretType_SECRET_TYPE_KUBECONFIG))
 				Expect(secret.GetCoordinates()).To(HaveKeyWithValue("hub_id", hubID))
 				Expect(secret.GetCoordinates()).To(HaveKeyWithValue("namespace", hcNamespace))
 				Expect(secret.GetCoordinates()).To(HaveKeyWithValue("secret_name", "my-kubeconfig-secret"))
@@ -1827,6 +1826,7 @@ var _ = Describe("ensureClusterSecrets", func() {
 				Expect(secret.GetMetadata().GetName()).To(Equal(clusterName + "-password"))
 				Expect(secret.GetMetadata().GetLabels()).To(
 					HaveKeyWithValue(labels.SecretType, "cluster-password"))
+				Expect(secret.GetType()).To(Equal(privatev1.SecretType_SECRET_TYPE_OPAQUE))
 				Expect(secret.GetCoordinates()).To(HaveKeyWithValue("secret_name", "my-password-secret"))
 				Expect(secret.GetCoordinates()).To(HaveKeyWithValue("key", "password"))
 				return &privatev1.SecretsCreateResponse{

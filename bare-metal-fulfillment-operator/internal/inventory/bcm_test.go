@@ -278,6 +278,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 				mockAPI.EXPECT().GetDevice(gomock.Any(), "node001").Return(verifiedDevice, nil),
 			)
 			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
 			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).DoAndReturn(
 				func(_ context.Context, params baremetalhost.CreateParams) error {
 					Expect(params.Name).To(Equal("node001"))
@@ -307,6 +308,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			mockAPI.EXPECT().GetDevice(gomock.Any(), "node001").Return(device, nil)
 			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
 			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
 
 			client := NewBCMClient(mockAPI, bmhMgr, "bcm")
 			host, err := client.AssignHost(ctx, bmhNamespace+"/node001", "bmi-123", nil)
@@ -397,6 +399,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			)
 			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
 			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
 
 			client := NewBCMClient(mockAPI, bmhMgr, "bcm")
 			host, err := client.AssignHost(ctx, bmhNamespace+"/node001", "bmi-123", nil)
@@ -570,6 +573,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 				Return("/redfish/v1/Systems/1", nil)
 			mockAPI.EXPECT().UpdateDevice(gomock.Any(), gomock.Any()).Return(&bcmclient.UpdateResponse{Success: true}, nil)
 			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
 			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).DoAndReturn(
 				func(_ context.Context, params baremetalhost.CreateParams) error {
 					Expect(params.BMCAddress).To(Equal("redfish-virtualmedia+https://10.141.0.1/redfish/v1/Systems/1"))
@@ -594,6 +598,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			)
 			mockAPI.EXPECT().UpdateDevice(gomock.Any(), gomock.Any()).Return(&bcmclient.UpdateResponse{Success: true}, nil)
 			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
 			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).DoAndReturn(
 				func(_ context.Context, params baremetalhost.CreateParams) error {
 					Expect(params.BMCAddress).To(Equal("ipmi://10.141.0.1"))
@@ -627,6 +632,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 				})
 			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
 			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
 
 			client := NewBCMClient(mockAPI, bmhMgr, "bcm")
 			client.SetBMCDiscoverer(mockDisc)
@@ -671,6 +677,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			device := makeDevice(`{"hostname":"node001","mac":"aa:bb:cc:dd:ee:01","bmcSettings":{"userName":"root","password":"calvin","userID":2},"extra_values":{"resource_class":"h100","osac_instance_id":"bmi-123","osac_bmc_address":"ipmi://10.0.0.1"}}`)
 			mockAPI.EXPECT().GetDevice(gomock.Any(), "node001").Return(device, nil)
 			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
 			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).DoAndReturn(
 				func(_ context.Context, params baremetalhost.CreateParams) error {
 					Expect(params.CredentialsSecret).To(Equal("node001-bmc-secret"))
@@ -691,6 +698,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}, nil)
 			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "bright", "wSXp5sQq").Return(nil)
 			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
 
 			client := NewBCMClient(mockAPI, bmhMgr, "bcm")
 			host, err := client.AssignHost(ctx, bmhNamespace+"/node001", "bmi-123", nil)
@@ -706,6 +714,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}, nil)
 			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "part-user", "part-pass").Return(nil)
 			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
 
 			client := NewBCMClient(mockAPI, bmhMgr, "bcm")
 			host, err := client.AssignHost(ctx, bmhNamespace+"/node001", "bmi-123", nil)
@@ -727,6 +736,50 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			host, err := client.AssignHost(ctx, bmhNamespace+"/node001", "bmi-123", nil)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("no BMC credentials configured in BCM"))
+			Expect(host).To(BeNil())
+		})
+
+		// OSAC-3769: BMH readiness gating. These use the skip-write path
+		// (osac_instance_id already set) with a Priority-1 address so the focus
+		// is the IsBMHReady result.
+		It("should return Host with Ready=false when the BareMetalHost is not ready", func(ctx context.Context) {
+			device := makeDevice(`{"hostname":"node001","mac":"aa:bb:cc:dd:ee:01","bmcSettings":{"userName":"root","password":"calvin"},"extra_values":{"resource_class":"h100","osac_instance_id":"bmi-123","osac_bmc_address":"ipmi://10.0.0.1"}}`)
+			mockAPI.EXPECT().GetDevice(gomock.Any(), "node001").Return(device, nil)
+			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
+			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(false, nil)
+
+			client := NewBCMClient(mockAPI, bmhMgr, "bcm")
+			host, err := client.AssignHost(ctx, bmhNamespace+"/node001", "bmi-123", nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(host).NotTo(BeNil())
+			Expect(host.Ready).To(BeFalse())
+		})
+
+		It("should return Host with Ready=true when the BareMetalHost is ready", func(ctx context.Context) {
+			device := makeDevice(`{"hostname":"node001","mac":"aa:bb:cc:dd:ee:01","bmcSettings":{"userName":"root","password":"calvin"},"extra_values":{"resource_class":"h100","osac_instance_id":"bmi-123","osac_bmc_address":"ipmi://10.0.0.1"}}`)
+			mockAPI.EXPECT().GetDevice(gomock.Any(), "node001").Return(device, nil)
+			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
+			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(true, nil)
+
+			client := NewBCMClient(mockAPI, bmhMgr, "bcm")
+			host, err := client.AssignHost(ctx, bmhNamespace+"/node001", "bmi-123", nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(host).NotTo(BeNil())
+			Expect(host.Ready).To(BeTrue())
+		})
+
+		It("should surface an error when the BareMetalHost is in an error state", func(ctx context.Context) {
+			device := makeDevice(`{"hostname":"node001","mac":"aa:bb:cc:dd:ee:01","bmcSettings":{"userName":"root","password":"calvin"},"extra_values":{"resource_class":"h100","osac_instance_id":"bmi-123","osac_bmc_address":"ipmi://10.0.0.1"}}`)
+			mockAPI.EXPECT().GetDevice(gomock.Any(), "node001").Return(device, nil)
+			bmhMgr.EXPECT().EnsureBMCSecret(gomock.Any(), "node001-bmc-secret", "root", "calvin").Return(nil)
+			bmhMgr.EXPECT().CreateBMH(gomock.Any(), gomock.Any()).Return(nil)
+			bmhMgr.EXPECT().IsBMHReady(gomock.Any(), "node001").Return(false, fmt.Errorf("BareMetalHost in error state"))
+
+			client := NewBCMClient(mockAPI, bmhMgr, "bcm")
+			host, err := client.AssignHost(ctx, bmhNamespace+"/node001", "bmi-123", nil)
+			Expect(err).To(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
 	})
@@ -773,7 +826,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).NotTo(BeNil())
 			Expect(host.InventoryHostID).To(Equal("osac-baremetal/node001"))
@@ -793,7 +846,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
@@ -808,12 +861,12 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
 
-		It("should skip devices without resource_class", func() {
+		It("should skip devices whose extra_values lack the selector label", func() {
 			bcmDevices = func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_, err := fmt.Fprint(w, `[
@@ -823,7 +876,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
@@ -838,12 +891,12 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
 
-		It("should filter by hostType from matchExpressions", func() {
+		It("should filter by an extra_values label (resource_class)", func() {
 			bcmDevices = func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_, err := fmt.Fprint(w, `[
@@ -854,7 +907,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).NotTo(BeNil())
 			Expect(host.Name).To(Equal("node002"))
@@ -869,26 +922,30 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
 
-		It("should return any matching host when hostType is empty", func() {
-			bcmDevices = func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				_, err := fmt.Fprint(w, `[
-					{"baseType":"Device","childType":"LiteNode","uuid":"u1","hostname":"node001","mac":"aa:bb:cc:dd:ee:01","extra_values":{"resource_class":"h100"}}
-				]`)
-				Expect(err).NotTo(HaveOccurred())
-			}
+		DescribeTable("should reject invalid selectors without querying BCM",
+			func(selector map[string]string) {
+				bcmDevices = func(_ http.ResponseWriter, _ *http.Request) {
+					Fail("GetDevices should not be called for an invalid selector")
+				}
 
-			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(host).NotTo(BeNil())
-			Expect(host.Name).To(Equal("node001"))
-		})
+				client := newTestClient()
+				host, err := client.FindFreeHost(ctx, selector)
+				Expect(err).To(HaveOccurred())
+				Expect(host).To(BeNil())
+			},
+			Entry("empty map", map[string]string{}),
+			Entry("empty key", map[string]string{"": "h100"}),
+			Entry("key with spaces", map[string]string{"resource class": "h100"}),
+			Entry("empty value", map[string]string{"resource_class": ""}),
+			Entry("reserved key osac_instance_id", map[string]string{"osac_instance_id": "x"}),
+			Entry("reserved key osac_bmc_address", map[string]string{"osac_bmc_address": "x"}),
+			Entry("reserved key osac_bmc_credentials_secret", map[string]string{"osac_bmc_credentials_secret": "x"}),
+		)
 
 		It("should skip devices with missing MAC address", func() {
 			bcmDevices = func(w http.ResponseWriter, _ *http.Request) {
@@ -900,7 +957,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
@@ -915,7 +972,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
@@ -930,7 +987,7 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
@@ -945,20 +1002,58 @@ var _ = Describe("BCM Inventory Adapter", func() {
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"hostType": "h100"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
 		})
 
-		It("should return nil when managedBy does not match default", func() {
-			bcmDevices = func(_ http.ResponseWriter, _ *http.Request) {
-				Fail("GetDevices should not be called when managedBy filter excludes BCM")
+		It("should skip hosts whose managedBy differs from the requested owner", func() {
+			bcmDevices = func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				// Device defaults to managedBy=baremetal (no managedBy label).
+				_, err := fmt.Fprint(w, `[
+					{"baseType":"Device","childType":"LiteNode","uuid":"u1","hostname":"node001","mac":"aa:bb:cc:dd:ee:01","extra_values":{"resource_class":"h100"}}
+				]`)
+				Expect(err).NotTo(HaveOccurred())
 			}
 
 			client := newTestClient()
-			host, err := client.FindFreeHost(ctx, map[string]string{"managedBy": "other-manager"})
+			host, err := client.FindFreeHost(ctx, map[string]string{"resource_class": "h100", "managedBy": "other-manager"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(BeNil())
+		})
+
+		It("should match a free host by an arbitrary extra_values label", func() {
+			bcmDevices = func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, err := fmt.Fprint(w, `[
+					{"baseType":"Device","childType":"LiteNode","uuid":"u1","hostname":"node001","mac":"aa:bb:cc:dd:ee:01","extra_values":{"gpu":"a100","datacenter":"west"}}
+				]`)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			client := newTestClient()
+			host, err := client.FindFreeHost(ctx, map[string]string{"gpu": "a100"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(host).NotTo(BeNil())
+			Expect(host.Name).To(Equal("node001"))
+		})
+
+		It("should require all selector labels to match (AND semantics)", func() {
+			bcmDevices = func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, err := fmt.Fprint(w, `[
+					{"baseType":"Device","childType":"LiteNode","uuid":"u1","hostname":"node001","mac":"aa:bb:cc:dd:ee:01","extra_values":{"gpu":"a100","datacenter":"east"}},
+					{"baseType":"Device","childType":"LiteNode","uuid":"u2","hostname":"node002","mac":"aa:bb:cc:dd:ee:02","extra_values":{"gpu":"a100","datacenter":"west"}}
+				]`)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			client := newTestClient()
+			host, err := client.FindFreeHost(ctx, map[string]string{"gpu": "a100", "datacenter": "west"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(host).NotTo(BeNil())
+			Expect(host.Name).To(Equal("node002"))
 		})
 
 		It("should match when managedBy is the default value", func() {

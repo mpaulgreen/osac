@@ -28,12 +28,12 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
 	"github.com/osac-project/osac/fulfillment-service/internal/references"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 type PrivateTenantsServerBuilder struct {
@@ -451,6 +451,14 @@ func (s *PrivateTenantsServer) validateBreakGlassCredentialsSecret(ctx context.C
 		}
 		s.logger.ErrorContext(ctx, "Failed to resolve break_glass_credentials_secret reference", "error", err)
 		return grpcstatus.Errorf(grpccodes.Internal, "failed to resolve break_glass_credentials_secret reference")
+	}
+	if resolved.Tenant == auth.SharedTenant {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument,
+			"shared secrets cannot be used as break_glass_credentials_secret references")
+	}
+	if err := validateResolvedSecretType(ctx, s.logger, s.secretsDao, ref, resolved,
+		"break_glass_credentials_secret", privatev1.SecretType_SECRET_TYPE_OPAQUE); err != nil {
+		return err
 	}
 	resolvedRef := &privatev1.SecretLocalReference{}
 	resolvedRef.SetId(resolved.ID)

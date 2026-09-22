@@ -31,12 +31,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/gvks"
 	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/labels"
 	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
 	osacv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 func verifyNotFound(g Gomega, err error) {
@@ -258,7 +258,7 @@ var _ = Describe("Cluster reconciler", func() {
 					NodeSets: map[string]*publicv1.ClusterNodeSet{
 						"my_node_set": publicv1.ClusterNodeSet_builder{
 							HostType: publicv1.HostTypeReference_builder{Id: hostTypeId}.Build(),
-							Size:     3,
+							Size:     proto.Int32(3),
 						}.Build(),
 					},
 				}.Build(),
@@ -310,7 +310,7 @@ var _ = Describe("Cluster reconciler", func() {
 					NodeSets: map[string]*publicv1.ClusterNodeSet{
 						"my_node_set": publicv1.ClusterNodeSet_builder{
 							HostType: publicv1.HostTypeReference_builder{Id: hostTypeId}.Build(),
-							Size:     5,
+							Size:     proto.Int32(5),
 						}.Build(),
 					},
 				}.Build(),
@@ -337,10 +337,10 @@ var _ = Describe("Cluster reconciler", func() {
 	})
 	Describe("Manages secrets as part of the cluster lifecycle", func() {
 		var (
-			secretsClient privatev1.SecretsClient
+			secretsClient publicv1.SecretsClient
 		)
 		BeforeEach(func() {
-			secretsClient = privatev1.NewSecretsClient(tool.InternalView().AdminConn())
+			secretsClient = publicv1.NewSecretsClient(tool.ExternalView().UserConn())
 		})
 
 		It("Creates and deletes hub secrets when a cluster is created and deleted", func() {
@@ -461,13 +461,13 @@ var _ = Describe("Cluster reconciler", func() {
 			}, time.Minute, time.Second).Should(Succeed())
 
 			// Make sure the secrets exist:
-			configSecret, err := secretsClient.Get(ctx, privatev1.SecretsGetRequest_builder{
+			configSecret, err := secretsClient.Get(ctx, publicv1.SecretsGetRequest_builder{
 				Id: kubeconfigID,
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(configSecret.GetObject().GetData()).To(HaveKey("kubeconfig"))
 
-			passwordSecret, err := secretsClient.Get(ctx, privatev1.SecretsGetRequest_builder{
+			passwordSecret, err := secretsClient.Get(ctx, publicv1.SecretsGetRequest_builder{
 				Id: passwordID,
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
@@ -489,12 +489,12 @@ var _ = Describe("Cluster reconciler", func() {
 					g.Expect(grpcstatus.Code(err)).To(Equal(grpccodes.NotFound))
 				}
 
-				_, err = secretsClient.Get(ctx, privatev1.SecretsGetRequest_builder{
+				_, err = secretsClient.Get(ctx, publicv1.SecretsGetRequest_builder{
 					Id: kubeconfigID,
 				}.Build())
 				g.Expect(err).To(HaveOccurred())
 				verifyNotFound(g, err)
-				_, err = secretsClient.Get(ctx, privatev1.SecretsGetRequest_builder{
+				_, err = secretsClient.Get(ctx, publicv1.SecretsGetRequest_builder{
 					Id: passwordID,
 				}.Build())
 				verifyNotFound(g, err)

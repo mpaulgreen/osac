@@ -1045,7 +1045,9 @@
         "username",
         "organization",
         "roles",
-        "osac-api"
+        "osac-api",
+        "email",
+        "profile"
       ],
       "optionalClientScopes": []
     },
@@ -1054,18 +1056,19 @@
       "clientId": "osac-ui",
       "name": "OSAC UI",
       "description": "OSAC web console",
-      "rootUrl": "",
+      "rootUrl": "http://ui.osac.localhost:8080",
       "adminUrl": "",
-      "baseUrl": "",
+      "baseUrl": "/",
       "surrogateAuthRequired": false,
       "enabled": true,
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
       "redirectUris": [
-        "/*"
+        "http://ui.osac.localhost:8080/callback",
+        "http://ui.osac.localhost:8080/*"
       ],
       "webOrigins": [
-        "+"
+        "http://ui.osac.localhost:8080"
       ],
       "notBefore": 0,
       "bearerOnly": false,
@@ -1156,6 +1159,20 @@
         "organization",
         "offline_access",
         "microprofile-jwt"
+      ],
+      "protocolMappers": [
+        {
+          "id": "osac-api-audience",
+          "name": "osac-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "osac-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
       ]
     },
     {
@@ -1602,7 +1619,8 @@
             "access.token.claim": "true",
             "claim.name": "organization"
           }
-        }, {
+        },
+        {
           "id": "org-group-membership-001",
           "name": "organization-groups",
           "protocol": "openid-connect",

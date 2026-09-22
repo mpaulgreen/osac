@@ -24,10 +24,10 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 var _ = Describe("Private projects server", func() {
@@ -447,8 +447,8 @@ var _ = Describe("Private projects server", func() {
 			localTenancy.EXPECT().DetermineDefaultTenant(gomock.Any()).
 				Return(auth.SystemTenant, nil).
 				AnyTimes()
-			localTenancy.EXPECT().DetermineVisibleTenants(gomock.Any()).
-				Return(auth.AllTenants, nil).
+			localTenancy.EXPECT().DetermineVisibility(gomock.Any()).
+				Return(auth.TotalVisibility(), nil).
 				AnyTimes()
 			localServer, err := NewPrivateProjectsServer().
 				SetLogger(logger).

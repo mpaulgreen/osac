@@ -44,7 +44,7 @@ import (
 // (which holds identifiers shared with the feedback controller).
 const osacVolumeFinalizer = "osac.openshift.io/volume-finalizer"
 
-// statusStampPollInterval is the requeue delay when backend/protocol have not
+// statusStampPollInterval is the requeue delay when provider/protocol have not
 // yet been stamped by the fulfillment-service. Kept short because the stamp
 // typically lands within a second of CR creation.
 const statusStampPollInterval = 2 * time.Second
@@ -59,29 +59,36 @@ type VendorProvisioner interface {
 	DeleteVolume(ctx context.Context, req VendorDeleteVolumeRequest) error
 }
 
-// VendorCreateVolumeRequest carries the parameters the vendor needs to
-// provision a volume. Backend and Protocol are resolved by the
-// fulfillment-service tier resolution (OSAC-3277) before the Volume CR is
-// created; the operator passes them through to the vendor without re-resolving.
+// VendorCreateVolumeRequest carries the provider-neutral parameters needed to
+// provision a volume. Provider and Protocol are resolved by the
+// fulfillment-service before the Volume CR is created; the operator passes
+// them through to the selected implementation without re-resolving.
 // Tenant and Tier let the vendor implementation select the per-tenant
 // credentials and construct the per-tenant/per-tier vendor resource references
 // (e.g. the VAST subsystem/view name) without re-deriving them.
 type VendorCreateVolumeRequest struct {
 	Name       string
-	Backend    string
+	Provider   string
 	Tenant     string
 	Tier       string
 	SizeGiB    int64
 	AccessMode v1alpha1.VolumeAccessMode
 	Protocol   v1alpha1.VolumeProtocol
+	Topology   v1alpha1.VolumeTopology
 }
 
 // VendorCreateVolumeResponse carries the vendor-assigned identifiers that the
 // feedback controller syncs back to the fulfillment-service inventory.
 type VendorCreateVolumeResponse struct {
 	VendorVolumeID string
-	Backend        string
 	Protocol       string
+
+	// VendorContext holds the backend-specific attach parameters used for this vendor's
+	// CreateVolume call (for example VAST's "subsystem" and "vip_pool_name"). Opaque to the
+	// operator: synced to fulfillment-service and forwarded unchanged by osac-csi-driver to the
+	// vendor CSI controller's ControllerPublishVolume, since that call needs the same parameters
+	// CreateVolume used and has no other way to obtain them.
+	VendorContext map[string]string
 }
 
 // VendorDeleteVolumeRequest identifies the vendor volume to deprovision. Tenant
@@ -89,12 +96,12 @@ type VendorCreateVolumeResponse struct {
 // authenticate the deprovision call.
 type VendorDeleteVolumeRequest struct {
 	VendorVolumeID string
-	Backend        string
+	Provider       string
 	Tenant         string
 }
 
 // VolumeReconciler reconciles Volume CRs created by the fulfillment-service
-// reconciler. It calls the VendorProvisioner to create volumes on the backend
+// reconciler. It selects a provider-specific VendorProvisioner to create volumes on the backend
 // storage array and updates the CR status with vendor-assigned identifiers.
 // The feedback controller then syncs that status back to fulfillment-service.
 //
@@ -103,10 +110,10 @@ type VendorDeleteVolumeRequest struct {
 // is a synchronous gRPC call, not an asynchronous job.
 type VolumeReconciler struct {
 	client.Client
-	Scheme            *runtime.Scheme
-	mgr               mcmanager.Manager
-	VolumeNamespace   string
-	VendorProvisioner VendorProvisioner
+	Scheme             *runtime.Scheme
+	mgr                mcmanager.Manager
+	VolumeNamespace    string
+	VendorProvisioners VendorProvisionerRegistry
 }
 
 // NewVolumeReconciler creates a new reconciler for Volume resources. The
@@ -116,7 +123,7 @@ type VolumeReconciler struct {
 func NewVolumeReconciler(
 	mgr mcmanager.Manager,
 	volumeNamespace string,
-	vendorProvisioner VendorProvisioner,
+	provisioners VendorProvisionerRegistry,
 ) *VolumeReconciler {
 	if mgr == nil {
 		panic("mgr must not be nil")
@@ -125,11 +132,11 @@ func NewVolumeReconciler(
 		volumeNamespace = defaultVolumeNamespace
 	}
 	return &VolumeReconciler{
-		Client:            mgr.GetLocalManager().GetClient(),
-		Scheme:            mgr.GetLocalManager().GetScheme(),
-		mgr:               mgr,
-		VolumeNamespace:   volumeNamespace,
-		VendorProvisioner: vendorProvisioner,
+		Client:             mgr.GetLocalManager().GetClient(),
+		Scheme:             mgr.GetLocalManager().GetScheme(),
+		mgr:                mgr,
+		VolumeNamespace:    volumeNamespace,
+		VendorProvisioners: provisioners,
 	}
 }
 
@@ -187,13 +194,13 @@ func (r *VolumeReconciler) handleUpdate(ctx context.Context, vol *v1alpha1.Volum
 		}
 	}
 
-	// Backend and protocol are stamped by the fulfillment-service in a separate
+	// Provider and protocol are stamped by the fulfillment-service in a separate
 	// Status().Update() after it creates the Volume CR. If the operator reconciles
 	// before that stamp lands, these fields are empty. Requeue WITHOUT writing
 	// status (no phase change) to avoid clobbering FS's concurrent stamp with a
 	// resourceVersion bump.
-	if vol.Status.Backend == "" || vol.Status.Protocol == "" {
-		log.Info("backend/protocol not yet populated by fulfillment-service, requeueing")
+	if vol.Status.Provider == "" || vol.Status.Protocol == "" {
+		log.Info("provider/protocol not yet populated by fulfillment-service, requeueing")
 		return ctrl.Result{RequeueAfter: statusStampPollInterval}, nil
 	}
 
@@ -232,20 +239,30 @@ func (r *VolumeReconciler) handleProvisioning(ctx context.Context, vol *v1alpha1
 	// backend configured; the Volume controller must not take the operator or
 	// other controllers down when it is unconfigured. Provisioning resumes once a
 	// vendor controller is configured.
-	if r.VendorProvisioner == nil {
+	if len(r.VendorProvisioners) == 0 {
 		log.Info("no vendor provisioner configured; leaving volume in Progressing (provisioning skipped)")
 		vol.Status.Phase = v1alpha1.VolumePhaseProgressing
 		return ctrl.Result{}, nil
 	}
 
-	resp, err := r.VendorProvisioner.CreateVolume(ctx, VendorCreateVolumeRequest{
+	provider := resolvedVolumeProvider(vol)
+	provisioner, err := r.VendorProvisioners.Lookup(provider)
+	if err != nil {
+		log.Error(err, "volume provider is not implemented", "provider", provider)
+		vol.Status.Phase = v1alpha1.VolumePhaseFailed
+		setVendorProvisionedCondition(&vol.Status.Conditions, metav1.ConditionFalse, "ProviderNotImplemented", err.Error())
+		return ctrl.Result{}, nil
+	}
+
+	resp, err := provisioner.CreateVolume(ctx, VendorCreateVolumeRequest{
 		Name:       vol.Name,
-		Backend:    vol.Status.Backend,
+		Provider:   provider,
 		Tenant:     vol.GetAnnotations()[osacTenantKey],
 		Tier:       vol.Spec.StorageTier,
 		SizeGiB:    vol.Spec.SizeGiB,
 		AccessMode: vol.Spec.AccessMode,
 		Protocol:   vol.Status.Protocol,
+		Topology:   copyVolumeTopology(vol.Spec.Topology),
 	})
 	if err != nil {
 		log.Error(err, "vendor provisioning failed")
@@ -255,14 +272,14 @@ func (r *VolumeReconciler) handleProvisioning(ctx context.Context, vol *v1alpha1
 	}
 
 	vol.Status.VendorVolumeID = resp.VendorVolumeID
-	vol.Status.Backend = resp.Backend
 	vol.Status.Protocol = v1alpha1.VolumeProtocol(resp.Protocol)
+	vol.Status.VendorContext = resp.VendorContext
 	vol.Status.Phase = v1alpha1.VolumePhaseReady
 	setVendorProvisionedCondition(&vol.Status.Conditions, metav1.ConditionTrue, "Provisioned", "Volume provisioned on vendor storage array")
 
 	log.Info("vendor provisioning succeeded",
 		"vendorVolumeID", resp.VendorVolumeID,
-		"backend", resp.Backend,
+		"provider", provider,
 		"protocol", resp.Protocol,
 	)
 
@@ -290,15 +307,20 @@ func (r *VolumeReconciler) handleDelete(ctx context.Context, vol *v1alpha1.Volum
 	// is available. Volumes that failed before vendor provisioning have no
 	// VendorVolumeID, so they fall through to finalizer removal.
 	if vol.Status.VendorVolumeID != "" {
-		if r.VendorProvisioner == nil {
+		if len(r.VendorProvisioners) == 0 {
 			return ctrl.Result{}, fmt.Errorf(
 				"volume %q has vendorVolumeID %q but no vendor provisioner is configured; "+
 					"refusing to remove finalizer to avoid leaking the backend volume",
 				vol.Name, vol.Status.VendorVolumeID)
 		}
-		err := r.VendorProvisioner.DeleteVolume(ctx, VendorDeleteVolumeRequest{
+		provider := resolvedVolumeProvider(vol)
+		provisioner, err := r.VendorProvisioners.Lookup(provider)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		err = provisioner.DeleteVolume(ctx, VendorDeleteVolumeRequest{
 			VendorVolumeID: vol.Status.VendorVolumeID,
-			Backend:        vol.Status.Backend,
+			Provider:       provider,
 			Tenant:         vol.GetAnnotations()[osacTenantKey],
 		})
 		if err != nil {
@@ -315,6 +337,22 @@ func (r *VolumeReconciler) handleDelete(ctx context.Context, vol *v1alpha1.Volum
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// resolvedVolumeProvider returns the provider stamped by the fulfillment-service.
+func resolvedVolumeProvider(vol *v1alpha1.Volume) string {
+	return vol.Status.Provider
+}
+
+func copyVolumeTopology(topology *v1alpha1.VolumeTopology) v1alpha1.VolumeTopology {
+	if topology == nil {
+		return v1alpha1.VolumeTopology{}
+	}
+	segments := make(map[string]string, len(topology.Segments))
+	for key, value := range topology.Segments {
+		segments[key] = value
+	}
+	return v1alpha1.VolumeTopology{Segments: segments}
 }
 
 // VolumeNamespacePredicate filters events to only those in the configured

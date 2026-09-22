@@ -26,11 +26,13 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/collections"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
 	"github.com/osac-project/osac/fulfillment-service/internal/vault"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 var _ = Describe("Private secrets server", func() {
@@ -261,6 +263,39 @@ var _ = Describe("Private secrets server", func() {
 			Expect(st.Code()).To(Equal(codes.NotFound))
 		})
 
+		It("Rejects deleting a Vault secret referenced by an active resource", func() {
+			created := createVaultSecret()
+			clustersDao, err := dao.NewGenericDAO[*privatev1.Cluster]().
+				SetLogger(logger).
+				SetTenancyLogic(tenancy).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = clustersDao.Create().
+				SetObject(privatev1.Cluster_builder{
+					Metadata: privatev1.Metadata_builder{
+						Name:   "referencing-cluster",
+						Tenant: testTenant,
+					}.Build(),
+					Spec: privatev1.ClusterSpec_builder{
+						PullSecretSecret: privatev1.SecretLocalReference_builder{
+							Id: created.GetId(),
+						}.Build(),
+					}.Build(),
+				}.Build()).
+				Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = server.Delete(ctx, privatev1.SecretsDeleteRequest_builder{
+				Id: created.GetId(),
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			st, ok := status.FromError(err)
+			Expect(ok).To(BeTrue())
+			Expect(st.Code()).To(Equal(codes.FailedPrecondition))
+			Expect(st.Message()).To(ContainSubstring("in use"))
+		})
+
 		It("Generates UUID for id ignoring caller-provided value", func() {
 			callerProvidedId := "my-custom-id"
 			response, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
@@ -299,12 +334,25 @@ var _ = Describe("Private secrets server", func() {
 				Expect(st.Message()).To(ContainSubstring("metadata.name"))
 			})
 
-			It("Create without data fails", func() {
+			It("Create without a type or data defaults to opaque", func() {
+				response, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name: "my-secret",
+						}.Build(),
+					}.Build(),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(response.GetObject().GetType()).To(Equal(privatev1.SecretType_SECRET_TYPE_OPAQUE))
+			})
+
+			It("Create value secret without data fails", func() {
 				_, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
 					Object: privatev1.Secret_builder{
 						Metadata: privatev1.Metadata_builder{
 							Name: "my-secret",
 						}.Build(),
+						Type: privatev1.SecretType_SECRET_TYPE_VALUE,
 					}.Build(),
 				}.Build())
 				Expect(err).To(HaveOccurred())
@@ -314,35 +362,20 @@ var _ = Describe("Private secrets server", func() {
 				Expect(st.Message()).To(ContainSubstring("data"))
 			})
 
-			It("Create Vault secret without data fails", func() {
+			It("Create pull secret without its required data key fails", func() {
 				_, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
 					Object: privatev1.Secret_builder{
 						Metadata: privatev1.Metadata_builder{
 							Name: "my-secret",
 						}.Build(),
-						Backend: privatev1.SecretBackend_SECRET_BACKEND_VAULT,
+						Type: privatev1.SecretType_SECRET_TYPE_PULL_SECRET,
 					}.Build(),
 				}.Build())
 				Expect(err).To(HaveOccurred())
 				st, ok := status.FromError(err)
 				Expect(ok).To(BeTrue())
 				Expect(st.Code()).To(Equal(codes.InvalidArgument))
-				Expect(st.Message()).To(ContainSubstring("data"))
-			})
-
-			It("Create unspecified backend without data fails", func() {
-				_, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
-					Object: privatev1.Secret_builder{
-						Metadata: privatev1.Metadata_builder{
-							Name: "my-secret",
-						}.Build(),
-					}.Build(),
-				}.Build())
-				Expect(err).To(HaveOccurred())
-				st, ok := status.FromError(err)
-				Expect(ok).To(BeTrue())
-				Expect(st.Code()).To(Equal(codes.InvalidArgument))
-				Expect(st.Message()).To(ContainSubstring("data"))
+				Expect(st.Message()).To(ContainSubstring(".dockerconfigjson"))
 			})
 
 			It("Create Hub secret without coordinates fails", func() {
@@ -447,6 +480,24 @@ var _ = Describe("Private secrets server", func() {
 		})
 
 		Describe("Immutability", func() {
+			It("Update changing type fails", func() {
+				created := createVaultSecret()
+
+				_, err := server.Update(ctx, privatev1.SecretsUpdateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Id:   created.GetId(),
+						Type: privatev1.SecretType_SECRET_TYPE_VALUE,
+					}.Build(),
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"type"}},
+				}.Build())
+				Expect(err).To(HaveOccurred())
+				st, ok := status.FromError(err)
+				Expect(ok).To(BeTrue())
+				Expect(st.Code()).To(Equal(codes.InvalidArgument))
+				Expect(st.Message()).To(ContainSubstring("type"))
+				Expect(st.Message()).To(ContainSubstring("immutable"))
+			})
+
 			It("Update changing backend fails", func() {
 				created := createVaultSecret()
 
@@ -641,6 +692,110 @@ var _ = Describe("Private secrets server", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(response.GetObject().GetBackend()).To(Equal(
 					privatev1.SecretBackend_SECRET_BACKEND_HUB))
+			})
+		})
+
+		Describe("Shared Secret authorization", func() {
+			newTenantUserServer := func() *PrivateSecretsServer {
+				visibility, err := auth.NewVisibility().
+					AddVisibleTenants(auth.SharedTenant, testTenant).
+					Build()
+				Expect(err).ToNot(HaveOccurred())
+				restrictedTenancy := auth.NewMockTenancyLogic(ctrl)
+				restrictedTenancy.EXPECT().DetermineAssignableTenants(gomock.Any()).
+					Return(collections.NewSet(testTenant), nil).
+					AnyTimes()
+				restrictedTenancy.EXPECT().DetermineDefaultTenant(gomock.Any()).
+					Return(testTenant, nil).
+					AnyTimes()
+				restrictedTenancy.EXPECT().DetermineVisibility(gomock.Any()).
+					Return(visibility, nil).
+					AnyTimes()
+
+				restrictedServer, buildErr := NewPrivateSecretsServer().
+					SetLogger(logger).
+					SetAttributionLogic(attribution).
+					SetTenancyLogic(restrictedTenancy).
+					SetSecretStore(mockStore).
+					SetHubSecretFetcher(mockHubSecretFetcher).
+					Build()
+				Expect(buildErr).ToNot(HaveOccurred())
+				return restrictedServer
+			}
+
+			createSharedSecret := func(name string) *privatev1.Secret {
+				mockStore.EXPECT().
+					Store(gomock.Any(), auth.SharedTenant, "", name, gomock.Any()).
+					Return(nil)
+				response, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name:   name,
+							Tenant: auth.SharedTenant,
+						}.Build(),
+						Data: map[string][]byte{"key": []byte("value")},
+					}.Build(),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				return response.GetObject()
+			}
+
+			It("allows a platform administrator to create and retrieve a shared Vault Secret", func() {
+				created := createSharedSecret("shared-admin-secret")
+				mockStore.EXPECT().
+					Fetch(gomock.Any(), auth.SharedTenant, "", "shared-admin-secret").
+					Return(map[string][]byte{"key": []byte("value")}, nil)
+
+				response, err := server.Get(ctx, privatev1.SecretsGetRequest_builder{
+					Id: created.GetId(),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(response.GetObject().GetData()).To(HaveKey("key"))
+			})
+
+			It("rejects a tenant user's shared Secret create before writing to Vault", func() {
+				restrictedServer := newTenantUserServer()
+				_, err := restrictedServer.Create(ctx, privatev1.SecretsCreateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name:   "rejected-shared-secret",
+							Tenant: auth.SharedTenant,
+						}.Build(),
+						Data: map[string][]byte{"key": []byte("value")},
+					}.Build(),
+				}.Build())
+				Expect(status.Code(err)).To(Equal(codes.PermissionDenied))
+			})
+
+			It("lets tenant users see shared metadata but not retrieve or mutate its data", func() {
+				created := createSharedSecret("shared-protected-secret")
+				restrictedServer := newTenantUserServer()
+
+				list, err := restrictedServer.List(ctx, privatev1.SecretsListRequest_builder{
+					Filter: new("this.id == '" + created.GetId() + "'"),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(list.GetItems()).To(HaveLen(1))
+				Expect(list.GetItems()[0].GetData()).To(BeEmpty())
+
+				_, err = restrictedServer.Get(ctx, privatev1.SecretsGetRequest_builder{
+					Id: created.GetId(),
+				}.Build())
+				Expect(status.Code(err)).To(Equal(codes.PermissionDenied))
+
+				_, err = restrictedServer.Update(ctx, privatev1.SecretsUpdateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Id:   created.GetId(),
+						Data: map[string][]byte{"key": []byte("changed")},
+					}.Build(),
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"data"}},
+				}.Build())
+				Expect(status.Code(err)).To(Equal(codes.PermissionDenied))
+
+				_, err = restrictedServer.Delete(ctx, privatev1.SecretsDeleteRequest_builder{
+					Id: created.GetId(),
+				}.Build())
+				Expect(status.Code(err)).To(Equal(codes.PermissionDenied))
 			})
 		})
 

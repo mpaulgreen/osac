@@ -11,12 +11,12 @@ Unless required by applicable law or agreed to in writing, software distributed 
 language governing permissions and limitations under the License.
 */
 
-//go:generate mockgen -source=../../api/osac/private/v1/projects_service_grpc.pb.go -destination=projects_client_mock.go -package=tenant ProjectsClient
-//go:generate mockgen -source=../../api/osac/private/v1/virtual_networks_service_grpc.pb.go -destination=virtual_networks_client_mock.go -package=tenant VirtualNetworksClient
-//go:generate mockgen -source=../../api/osac/private/v1/subnets_service_grpc.pb.go -destination=subnets_client_mock.go -package=tenant SubnetsClient
-//go:generate mockgen -source=../../api/osac/private/v1/security_groups_service_grpc.pb.go -destination=security_groups_client_mock.go -package=tenant SecurityGroupsClient
-//go:generate mockgen -source=../../api/osac/private/v1/nat_gateways_service_grpc.pb.go -destination=nat_gateways_client_mock.go -package=tenant NATGatewaysClient
-//go:generate mockgen -source=../../api/osac/private/v1/network_classes_service_grpc.pb.go -destination=network_classes_client_mock.go -package=tenant NetworkClassesClient
+//go:generate mockgen -destination=projects_client_mock.go -package=tenant github.com/osac-project/osac/proto/gen/osac/private/v1 ProjectsClient
+//go:generate mockgen -destination=virtual_networks_client_mock.go -package=tenant github.com/osac-project/osac/proto/gen/osac/private/v1 VirtualNetworksClient
+//go:generate mockgen -destination=subnets_client_mock.go -package=tenant github.com/osac-project/osac/proto/gen/osac/private/v1 SubnetsClient
+//go:generate mockgen -destination=security_groups_client_mock.go -package=tenant github.com/osac-project/osac/proto/gen/osac/private/v1 SecurityGroupsClient
+//go:generate mockgen -destination=nat_gateways_client_mock.go -package=tenant github.com/osac-project/osac/proto/gen/osac/private/v1 NATGatewaysClient
+//go:generate mockgen -destination=network_classes_client_mock.go -package=tenant github.com/osac-project/osac/proto/gen/osac/private/v1 NetworkClassesClient
 
 package tenant
 
@@ -35,12 +35,12 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/finalizers"
 	"github.com/osac-project/osac/fulfillment-service/internal/idp"
 	"github.com/osac-project/osac/fulfillment-service/internal/masks"
 	"github.com/osac-project/osac/fulfillment-service/internal/vault"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 // FunctionBuilder contains the data needed to build instances of the reconciler function.
@@ -235,6 +235,13 @@ func (t *task) syncToIDP(ctx context.Context) error {
 		t.tenant.GetStatus().SetBreakGlassUserId(credentials.UserID)
 	}
 
+	// Ensure the Vault namespace exists before attempting to persist the break-glass secret.
+	// The secret will be stored in Vault under the tenant's namespace, so the namespace
+	// must be provisioned first.
+	if err := t.ensureVaultNamespace(ctx); err != nil {
+		return err
+	}
+
 	if err := t.persistBreakGlassSecret(ctx); err != nil {
 		t.r.logger.ErrorContext(ctx, "Failed to persist break-glass credentials secret",
 			slog.String("tenant_id", t.tenant.GetId()),
@@ -312,6 +319,7 @@ func (t *task) persistBreakGlassSecret(ctx context.Context) error {
 				Name:   breakGlassSecretName,
 				Tenant: tenantName,
 			}.Build(),
+			Type: privatev1.SecretType_SECRET_TYPE_OPAQUE,
 			Data: map[string][]byte{
 				"username": []byte(creds.GetUsername()),
 				"password": []byte(creds.GetPassword()),
@@ -450,6 +458,11 @@ func (t *task) delete(ctx context.Context) error {
 	}
 	t.clearBreakGlassSecretRef()
 
+	// Delete the auto-created unnamed root project so it does not block tenant deletion.
+	if err := t.deleteRootProject(ctx); err != nil {
+		return err
+	}
+
 	// Block until all projects are deleted by the administrator.
 	remaining, err := t.countRemainingProjects(ctx)
 	if err != nil {
@@ -561,6 +574,42 @@ func (t *task) countRemainingProjects(ctx context.Context) (int32, error) {
 	return listResp.GetTotal(), nil
 }
 
+// deleteRootProject deletes the auto-created unnamed root project (empty name) that is
+// automatically created for each tenant. Without this, the root project blocks tenant
+// deletion because countRemainingProjects never reaches zero.
+func (t *task) deleteRootProject(ctx context.Context) error {
+	tenantName := t.tenant.GetMetadata().GetName()
+	listFilter := fmt.Sprintf(
+		"this.metadata.name == '' && this.metadata.tenant == %q",
+		tenantName,
+	)
+	listResp, err := t.r.projectsClient.List(ctx, privatev1.ProjectsListRequest_builder{
+		Filter: new(listFilter),
+	}.Build())
+	if err != nil {
+		return fmt.Errorf("failed to list root project: %w", err)
+	}
+	for _, project := range listResp.GetItems() {
+		if project.GetMetadata().HasDeletionTimestamp() {
+			continue
+		}
+		_, err = t.r.projectsClient.Delete(ctx, privatev1.ProjectsDeleteRequest_builder{
+			Id: project.GetId(),
+		}.Build())
+		if err != nil {
+			if grpcstatus.Code(err) == grpccodes.NotFound {
+				continue
+			}
+			return fmt.Errorf("failed to delete root project: %w", err)
+		}
+		t.r.logger.DebugContext(ctx, "Deleted root project for tenant",
+			slog.String("tenant_id", t.tenant.GetId()),
+			slog.String("project_id", project.GetId()),
+		)
+	}
+	return nil
+}
+
 var tenantConditionTypes = []privatev1.TenantConditionType{
 	privatev1.TenantConditionType_TENANT_CONDITION_TYPE_DEFAULT_NETWORKING_READY,
 	privatev1.TenantConditionType_TENANT_CONDITION_TYPE_VAULT_READY,
@@ -632,7 +681,9 @@ func (t *task) ensureVaultNamespace(ctx context.Context) error {
 	if t.r.vaultLifecycle == nil {
 		return nil
 	}
-	if t.isBuiltin() {
+	// The shared tenant stores platform-managed Secrets used by shared templates, so it needs a
+	// Vault namespace. The system tenant remains internal-only and must not get one.
+	if t.tenant.GetMetadata().GetName() == auth.SystemTenant {
 		return nil
 	}
 	if t.isConditionTrue(condType) {
@@ -693,11 +744,19 @@ const (
 )
 
 func (t *task) checkDefaultNetworkingReadiness(ctx context.Context) error {
+	tenantName := t.tenant.GetMetadata().GetName()
+	condType := privatev1.TenantConditionType_TENANT_CONDITION_TYPE_DEFAULT_NETWORKING_READY
+
+	if tenantName == auth.SystemTenant || tenantName == auth.SharedTenant {
+		t.updateCondition(condType, privatev1.ConditionStatus_CONDITION_STATUS_TRUE,
+			"ReservedTenant", "Reserved tenants do not require default networking")
+		return nil
+	}
+
 	if t.r.virtualNetworksClient == nil {
 		return nil
 	}
-	tenantName := t.tenant.GetMetadata().GetName()
-	condType := privatev1.TenantConditionType_TENANT_CONDITION_TYPE_DEFAULT_NETWORKING_READY
+
 	filter := fmt.Sprintf("%s && this.metadata.tenant == %q", defaultLabelFilter, tenantName)
 
 	var pending, failed []string

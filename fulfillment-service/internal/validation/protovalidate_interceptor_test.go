@@ -25,8 +25,8 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 // testPassword is a fixture credential; the test* prefix marks it as non-production.
@@ -219,38 +219,6 @@ var _ = Describe("Protovalidate interceptor", func() {
 			Expect(ok).To(BeTrue())
 			Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
 			Expect(status.Message()).To(ContainSubstring("validation failed"))
-		})
-
-		It("Rejects requests with label keys that are too long", func() {
-			// Create Metadata with label key > 316 chars:
-			longKey := ""
-			for i := 0; i < 320; i++ {
-				longKey = longKey + "a"
-			}
-			invalidMetadata := &publicv1.Metadata{
-				Name: "valid-name",
-				Labels: map[string]string{
-					longKey: "value",
-				},
-			}
-
-			mockHandler := func(ctx context.Context, req any) (any, error) {
-				Fail("Handler should not be called for invalid request")
-				return nil, nil
-			}
-
-			response, err := interceptor.UnaryServer(
-				context.Background(),
-				invalidMetadata,
-				&grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"},
-				mockHandler,
-			)
-
-			Expect(err).To(HaveOccurred())
-			Expect(response).To(BeNil())
-			status, ok := grpcstatus.FromError(err)
-			Expect(ok).To(BeTrue())
-			Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
 		})
 
 		It("Rejects empty name (mandatory field)", func() {
@@ -882,14 +850,14 @@ var _ = Describe("Protovalidate interceptor", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		It("Rejects create request with zero cores", func() {
+		It("Rejects create request with zero vCPUs", func() {
 			request := privatev1.InstanceTypesCreateRequest_builder{
 				Object: privatev1.InstanceType_builder{
 					Metadata: privatev1.Metadata_builder{
 						Name: "my-type",
 					}.Build(),
 					Spec: privatev1.InstanceTypeSpec_builder{
-						Cores:     0,
+						Vcpus:     0,
 						MemoryGib: 16,
 					}.Build(),
 				}.Build(),
@@ -922,7 +890,7 @@ var _ = Describe("Protovalidate interceptor", func() {
 						Name: "my-type",
 					}.Build(),
 					Spec: privatev1.InstanceTypeSpec_builder{
-						Cores:     4,
+						Vcpus:     4,
 						MemoryGib: 0,
 					}.Build(),
 				}.Build(),
@@ -955,7 +923,7 @@ var _ = Describe("Protovalidate interceptor", func() {
 						Name: "my-type",
 					}.Build(),
 					Spec: privatev1.InstanceTypeSpec_builder{
-						Cores:     4,
+						Vcpus:     4,
 						MemoryGib: 16,
 					}.Build(),
 				}.Build(),

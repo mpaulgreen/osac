@@ -16,6 +16,7 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	"github.com/osac-project/osac-metering/adapters"
 )
 
@@ -243,6 +244,44 @@ var _ = Describe("translateEvent", func() {
 			Expect(payload["provider"]).To(Equal("anthropic"))
 			Expect(payload["prompt_tokens"]).To(BeEquivalentTo(1500))
 			Expect(payload["total_tokens"]).To(BeEquivalentTo(2300))
+		})
+	})
+
+	Describe("networking events", func() {
+		It("translates an ExternalIP event to the networking endpoint", func() {
+			ce := buildCloudEvent(
+				"ce-ip-001", "osac.resource.started.v1", "ip-001", "external_ip",
+				"tenant-acme", "project-net", map[string]any{
+					"deployment": "installation-a",
+					"pool":       "pool-1",
+					"ip_family":  "ipv4",
+					"attached":   false,
+				},
+			)
+
+			endpoint, payload, err := translateEvent(ce)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(endpoint).To(Equal("/networking/event"))
+			Expect(payload["resource_type"]).To(Equal("external_ip"))
+			Expect(payload["ip_family"]).To(Equal("ipv4"))
+		})
+
+		It("translates a NATGateway event to the networking endpoint", func() {
+			ce := buildCloudEvent(
+				"ce-nat-001", "osac.resource.started.v1", "nat-001", "nat_gateway",
+				"tenant-acme", "project-net", map[string]any{
+					"deployment":      "installation-a",
+					"virtual_network": "vnet-1",
+					"external_ip":     "ip-001",
+				},
+			)
+
+			endpoint, payload, err := translateEvent(ce)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(endpoint).To(Equal("/networking/event"))
+			Expect(payload["resource_type"]).To(Equal("nat_gateway"))
 		})
 	})
 

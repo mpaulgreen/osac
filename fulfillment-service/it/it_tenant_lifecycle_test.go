@@ -28,11 +28,11 @@ import (
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/finalizers"
 	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 func createTenant(ctx context.Context, client privatev1.TenantsClient, name string) string {
@@ -372,6 +372,70 @@ var _ = Describe("Tenant lifecycle", func() {
 		status, ok := grpcstatus.FromError(err)
 		Expect(ok).To(BeTrue())
 		Expect(status.Code()).To(Equal(grpccodes.PermissionDenied))
+	})
+
+	It("Persists break-glass credentials to a Secret and clears inline status", func(ctx context.Context) {
+		// breakGlassSecretName mirrors the unexported constant in the tenant reconciler.
+		const breakGlassSecretName = "break-glass-credentials"
+
+		name := fmt.Sprintf("test-%s", uuid.New())
+
+		By(fmt.Sprintf("Creating tenant %q", name))
+		id := createTenant(ctx, tenantsClient, name)
+
+		By("Waiting for tenant to reach SYNCED state")
+		waitForTenantSynced(ctx, tenantsClient, id)
+
+		By("Verifying the break-glass credentials secret reference is recorded on the spec")
+		getResponse, err := tenantsClient.Get(ctx, privatev1.TenantsGetRequest_builder{
+			Id: id,
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		object := getResponse.GetObject()
+
+		ref := object.GetSpec().GetBreakGlassCredentialsSecret()
+		Expect(ref).ToNot(BeNil(), "spec.break_glass_credentials_secret should be set after sync")
+		Expect(ref.GetId()).ToNot(BeEmpty())
+		Expect(ref.GetName()).To(Equal(breakGlassSecretName))
+
+		By("Verifying inline break-glass credentials are cleared from status")
+		Expect(object.GetStatus().GetBreakGlassCredentials().GetPassword()).To(BeEmpty(),
+			"inline status credentials should be cleared once persisted to a secret")
+		Expect(object.GetStatus().GetBreakGlassUserId()).ToNot(BeEmpty())
+
+		By("Fetching the referenced secret and verifying it carries the credentials")
+		secretsClient := privatev1.NewSecretsClient(tool.InternalView().AdminConn())
+		secretResponse, err := secretsClient.Get(ctx, privatev1.SecretsGetRequest_builder{
+			Id: ref.GetId(),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		data := secretResponse.GetObject().GetData()
+		Expect(data).To(HaveKey("password"))
+		Expect(data).To(HaveKey("username"))
+		Expect(data["password"]).ToNot(BeEmpty())
+		Expect(string(data["username"])).To(Equal(fmt.Sprintf("%s-osac-break-glass", name)))
+
+		By("Verifying the persisted password authenticates as the break-glass user")
+		// The credential is created temporary, so the UPDATE_PASSWORD required action must be
+		// cleared before the stored password can be used to obtain a token.
+		code, _, err := tool.KeycloakAdminRequest(ctx, http.MethodPut,
+			fmt.Sprintf("/users/%s", object.GetStatus().GetBreakGlassUserId()),
+			map[string]any{
+				"requiredActions": []string{},
+			})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(code).To(Equal(http.StatusNoContent))
+
+		tokenSource, err := tool.makeKeycloakTokenSource(ctx, string(data["username"]), string(data["password"]))
+		Expect(err).ToNot(HaveOccurred())
+
+		// Obtaining an access token from the OIDC password flow proves the persisted password
+		// authenticates as the break-glass user. We deliberately do not exercise a downstream gRPC
+		// call here: that would assert the break-glass user's API authorization, which is out of
+		// scope for this test (and covered separately by the break-glass JWT/role specs).
+		token, err := tokenSource.Token(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(token.Access).ToNot(BeEmpty())
 	})
 
 	It("Duplicate tenant name fails", func(ctx context.Context) {
@@ -776,8 +840,11 @@ var _ = Describe("Multi-tenant resource isolation", func() {
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() {
-			_, _ = networkClassClient.Delete(ctx, privatev1.NetworkClassesDeleteRequest_builder{
+		// Use a fresh context for cleanup: the ctx from this BeforeEach is cancelled by Ginkgo as soon as this
+		// node returns, so reusing it here would make the Delete call fail with "context canceled" and leak the
+		// NetworkClass — which is fatal now that only one NetworkClass may exist per deployment (OSAC-4073).
+		DeferCleanup(func(cleanupCtx context.Context) {
+			_, _ = networkClassClient.Delete(cleanupCtx, privatev1.NetworkClassesDeleteRequest_builder{
 				Id: ncResp.GetObject().GetId(),
 			}.Build())
 		})
@@ -819,8 +886,8 @@ var _ = Describe("Multi-tenant resource isolation", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		vnId := createResp.GetObject().GetId()
-		DeferCleanup(func() {
-			_, _ = vnAdminClient.Delete(ctx, privatev1.VirtualNetworksDeleteRequest_builder{
+		DeferCleanup(func(cleanupCtx context.Context) {
+			_, _ = vnAdminClient.Delete(cleanupCtx, privatev1.VirtualNetworksDeleteRequest_builder{
 				Id: vnId,
 			}.Build())
 		})
@@ -887,8 +954,8 @@ var _ = Describe("Multi-tenant resource isolation", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		vnId := createResp.GetObject().GetId()
-		DeferCleanup(func() {
-			_, _ = vnAdminClient.Delete(ctx, privatev1.VirtualNetworksDeleteRequest_builder{
+		DeferCleanup(func(cleanupCtx context.Context) {
+			_, _ = vnAdminClient.Delete(cleanupCtx, privatev1.VirtualNetworksDeleteRequest_builder{
 				Id: vnId,
 			}.Build())
 		})
@@ -944,8 +1011,8 @@ var _ = Describe("Multi-tenant resource isolation", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		vnIdA := createRespA.GetObject().GetId()
-		DeferCleanup(func() {
-			_, _ = vnAdminClient.Delete(ctx, privatev1.VirtualNetworksDeleteRequest_builder{
+		DeferCleanup(func(cleanupCtx context.Context) {
+			_, _ = vnAdminClient.Delete(cleanupCtx, privatev1.VirtualNetworksDeleteRequest_builder{
 				Id: vnIdA,
 			}.Build())
 		})
@@ -965,8 +1032,8 @@ var _ = Describe("Multi-tenant resource isolation", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		vnIdB := createRespB.GetObject().GetId()
-		DeferCleanup(func() {
-			_, _ = vnAdminClient.Delete(ctx, privatev1.VirtualNetworksDeleteRequest_builder{
+		DeferCleanup(func(cleanupCtx context.Context) {
+			_, _ = vnAdminClient.Delete(cleanupCtx, privatev1.VirtualNetworksDeleteRequest_builder{
 				Id: vnIdB,
 			}.Build())
 		})
