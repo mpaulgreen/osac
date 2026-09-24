@@ -24,8 +24,9 @@ import (
 var resourceTypeEndpoints = map[string]string{
 	schema.ResourceTypeComputeInstance: "/vmaas/event",
 	schema.ResourceTypeClusterOrder:    "/caas/event",
-	schema.ResourceTypeExternalIP:      "/networking/event",
-	schema.ResourceTypeNATGateway:      "/networking/event",
+	schema.ResourceTypeExternalIP:      "/networking/externalip/event",
+	schema.ResourceTypeNATGateway:      "/networking/natgateway/event",
+	schema.ResourceTypeVolume:          "/storage/volume/event",
 	"maas_inference":                   "/maas/event",
 }
 
@@ -73,7 +74,18 @@ func translateEvent(ce cloudevents.Event) (string, map[string]any, error) {
 
 	// Copy lifecycle data fields to top level.
 	for _, key := range schema.LifecycleDataFields() {
+		if key == "usage" {
+			continue
+		}
 		payload[key] = nullToSpace(data[key])
+	}
+	if usage, ok := data["usage"].(map[string]any); ok {
+		payload["usage_semantics"] = usage["semantics"]
+		payload["interval_from"] = usage["from"]
+		payload["interval_to"] = usage["to"]
+		payload["usage_quantity"] = usage["quantity"]
+		payload["usage_unit"] = usage["unit"]
+		payload["usage_precision"] = usage["precision"]
 	}
 
 	// Merge billing_dimensions to top level, skipping non-billable

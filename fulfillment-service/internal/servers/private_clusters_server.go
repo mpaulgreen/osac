@@ -35,17 +35,19 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
+	"github.com/osac-project/osac/fulfillment-service/internal/references"
 	"github.com/osac-project/osac/fulfillment-service/internal/utils"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 type PrivateClustersServerBuilder struct {
-	logger            *slog.Logger
-	notifier          events.Notifier
-	attributionLogic  auth.AttributionLogic
-	tenancyLogic      auth.TenancyLogic
-	metricsRegisterer prometheus.Registerer
-	filterDesc        protoreflect.MessageDescriptor
+	logger              *slog.Logger
+	notifier            events.Notifier
+	attributionLogic    auth.AttributionLogic
+	tenancyLogic        auth.TenancyLogic
+	metricsRegisterer   prometheus.Registerer
+	filterDesc          protoreflect.MessageDescriptor
+	addOnOperatorLookup references.ReferenceLookupFunc
 }
 
 var _ privatev1.ClustersServer = (*PrivateClustersServer)(nil)
@@ -65,6 +67,7 @@ type PrivateClustersServer struct {
 	externalIPDao           *dao.GenericDAO[*privatev1.ExternalIP]
 	externalIPAttachmentDao *dao.GenericDAO[*privatev1.ExternalIPAttachment]
 	secretsDao              *dao.GenericDAO[*privatev1.Secret]
+	addOnOperatorLookup     references.ReferenceLookupFunc
 	generic                 *GenericServer[*privatev1.Cluster]
 	lifecycle               *externalIPLifecycle
 }
@@ -107,6 +110,12 @@ func (b *PrivateClustersServerBuilder) SetFilterDesc(value protoreflect.MessageD
 	return b
 }
 
+// SetAddOnOperatorLookup sets the resolver used for add-on operator references.
+func (b *PrivateClustersServerBuilder) SetAddOnOperatorLookup(value references.ReferenceLookupFunc) *PrivateClustersServerBuilder {
+	b.addOnOperatorLookup = value
+	return b
+}
+
 func (b *PrivateClustersServerBuilder) Build() (result *PrivateClustersServer, err error) {
 	// Check parameters:
 	if b.logger == nil {
@@ -135,6 +144,21 @@ func (b *PrivateClustersServerBuilder) Build() (result *PrivateClustersServer, e
 		Build()
 	if err != nil {
 		return
+	}
+
+	addOnOperatorLookup := b.addOnOperatorLookup
+	if addOnOperatorLookup == nil {
+		// Create the private add-on operators DAO:
+		addOnOperatorsDao, daoErr := dao.NewGenericDAO[*privatev1.AddOnOperator]().
+			SetLogger(b.logger).
+			SetTenancyLogic(b.tenancyLogic).
+			SetMetricsRegisterer(b.metricsRegisterer).
+			Build()
+		if daoErr != nil {
+			err = daoErr
+			return
+		}
+		addOnOperatorLookup = references.NewDAOLookupFunc(addOnOperatorsDao)
 	}
 
 	// Create the host types DAO:
@@ -252,6 +276,7 @@ func (b *PrivateClustersServerBuilder) Build() (result *PrivateClustersServer, e
 		externalIPDao:           externalIPDao,
 		externalIPAttachmentDao: externalIPAttachmentDao,
 		secretsDao:              secretsDao,
+		addOnOperatorLookup:     addOnOperatorLookup,
 		generic:                 generic,
 	}
 	result.lifecycle = newExternalIPLifecycle(
@@ -304,6 +329,9 @@ func (s *PrivateClustersServer) Create(ctx context.Context, request *privatev1.C
 func (s *PrivateClustersServer) prepareCreate(ctx context.Context, candidate *privatev1.Cluster) (err error) {
 	// Ensure sane defaults:
 	s.setDefaults(candidate)
+	if err = s.resolveAddOnOperators(ctx, candidate); err != nil {
+		return
+	}
 
 	// Get the spec:
 	spec := candidate.GetSpec()
@@ -320,6 +348,11 @@ func (s *PrivateClustersServer) prepareCreate(ctx context.Context, candidate *pr
 	}
 	if err = s.applyClusterTemplate(ctx, candidate, template); err != nil {
 		return
+	}
+	if key := spec.GetSshPublicKey(); key != "" {
+		if err = validateOpenSSHPublicKey(key); err != nil {
+			return grpcstatus.Errorf(grpccodes.InvalidArgument, "spec.ssh_public_key: %s", err)
+		}
 	}
 
 	if candidate.GetSpec().GetNetworkAttachment() == nil {
@@ -342,6 +375,36 @@ func (s *PrivateClustersServer) prepareCreate(ctx context.Context, candidate *pr
 	}
 
 	return
+}
+
+func (s *PrivateClustersServer) resolveAddOnOperators(ctx context.Context, cluster *privatev1.Cluster) error {
+	metadata := cluster.GetMetadata()
+	for index, ref := range cluster.GetSpec().GetAddOnOperators() {
+		if ref == nil || (ref.GetId() == "" && ref.GetName() == "") {
+			return grpcstatus.Errorf(grpccodes.InvalidArgument,
+				"spec.add_on_operators[%d] must specify id or name", index)
+		}
+
+		resolved, err := s.addOnOperatorLookup(ctx, metadata.GetTenant(), metadata.GetProject(), ref.GetId(), ref.GetName())
+		if err != nil {
+			var notFound interface{ IsNotFound() bool }
+			if errors.As(err, &notFound) && notFound.IsNotFound() {
+				return grpcstatus.Errorf(grpccodes.InvalidArgument,
+					"add-on operator %q referenced by spec.add_on_operators[%d] was not found",
+					refKey(ref), index)
+			}
+			return grpcstatus.Errorf(grpccodes.Internal,
+				"failed to resolve spec.add_on_operators[%d]", index)
+		}
+		if resolved == nil {
+			return grpcstatus.Errorf(grpccodes.Internal,
+				"failed to resolve spec.add_on_operators[%d]", index)
+		}
+
+		ref.SetId(resolved.ID)
+		ref.SetName(resolved.Name)
+	}
+	return nil
 }
 
 // resolveCreationSource accepts exactly one provisioning source: spec.catalog_item or
@@ -392,9 +455,23 @@ func (s *PrivateClustersServer) Update(ctx context.Context,
 	if err != nil {
 		return
 	}
+	err = s.validateSpecUpdateRequest(request)
+	if err != nil {
+		return
+	}
 
 	err = s.generic.UpdateWithCandidatePreparation(ctx, request, &response, func(ctx context.Context, current *privatev1.Cluster, candidate *privatev1.Cluster) error {
 		if err := validateClusterTemplateImmutability(current, candidate, request.GetUpdateMask()); err != nil {
+			return err
+		}
+		if updateIncludesField(request.GetUpdateMask(), "spec.ssh_public_key") {
+			if key := candidate.GetSpec().GetSshPublicKey(); key != "" {
+				if err := validateOpenSSHPublicKey(key); err != nil {
+					return grpcstatus.Errorf(grpccodes.InvalidArgument, "spec.ssh_public_key: %s", err)
+				}
+			}
+		}
+		if err := s.validateAddOnOperatorImmutability(current, candidate, request.GetUpdateMask()); err != nil {
 			return err
 		}
 		if err := utils.ValidateClusterSpecFields(candidate.GetSpec()); err != nil {
@@ -415,6 +492,15 @@ func (s *PrivateClustersServer) Update(ctx context.Context,
 		return nil
 	})
 	return
+}
+
+func (s *PrivateClustersServer) validateSpecUpdateRequest(request *privatev1.ClustersUpdateRequest) error {
+	updateMask := request.GetUpdateMask()
+	if updateMask != nil && len(updateMask.GetPaths()) > 0 &&
+		updateIncludesField(updateMask, "spec") && request.GetObject().GetSpec() == nil {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, "object and spec are required")
+	}
+	return nil
 }
 
 func (s *PrivateClustersServer) Delete(ctx context.Context,
@@ -509,12 +595,8 @@ func (s *PrivateClustersServer) validatePullSecretSecret(
 			return err
 		}
 	}
-	if secret.GetType() != privatev1.SecretType_SECRET_TYPE_PULL_SECRET {
-		return grpcstatus.Errorf(grpccodes.InvalidArgument,
-			"secret '%s' referenced by pull_secret_secret has type %s; expected %s",
-			identifier, secret.GetType(), privatev1.SecretType_SECRET_TYPE_PULL_SECRET)
-	}
-	return nil
+	return validateResolvedSecretLifecycleAndType(secret, identifier, "pull_secret_secret",
+		privatev1.SecretType_SECRET_TYPE_PULL_SECRET)
 }
 
 func (s *PrivateClustersServer) lookupHostType(ctx context.Context,
@@ -723,6 +805,29 @@ func (s *PrivateClustersServer) validateAtLeastOneNodeSet(nodeSets map[string]*p
 	return nil
 }
 
+// validateClusterNodeSetMap checks that a node-set map has at least one entry and that
+// every entry has the fields required after defaults and references have been resolved.
+func validateClusterNodeSetMap(nodeSets map[string]*privatev1.ClusterNodeSet) error {
+	if len(nodeSets) == 0 {
+		return fmt.Errorf("must contain at least one node set")
+	}
+	for name, nodeSet := range nodeSets {
+		if nodeSet == nil {
+			return fmt.Errorf("node set '%s' must not be null", name)
+		}
+		if !nodeSet.HasSize() {
+			return fmt.Errorf("size for node set '%s' is required", name)
+		}
+		if nodeSet.GetSize() <= 0 {
+			return fmt.Errorf("size for node set '%s' should be greater than zero, but it is %d", name, nodeSet.GetSize())
+		}
+		if nodeSet.GetHostType() == nil || refKey(nodeSet.GetHostType()) == "" {
+			return fmt.Errorf("host type for node set '%s' is required", name)
+		}
+	}
+	return nil
+}
+
 // validateNodeSetHostTypeImmutability ensures that the host_type field of existing node sets
 // cannot be changed. This is an existing documented restriction in the API specification.
 func (s *PrivateClustersServer) validateNodeSetHostTypeImmutability(
@@ -783,6 +888,44 @@ func validateClusterTemplateImmutability(current, candidate *privatev1.Cluster, 
 			newSpec.SetCatalogItem(ref)
 		}
 	}
+
+	return nil
+}
+
+// validateAddOnOperatorImmutability validates and preserves the canonical operator references during updates.
+func (s *PrivateClustersServer) validateAddOnOperatorImmutability(
+	current, candidate *privatev1.Cluster, mask *fieldmaskpb.FieldMask,
+) error {
+	currentOperators := current.GetSpec().GetAddOnOperators()
+	candidateOperators := candidate.GetSpec().GetAddOnOperators()
+	cloneCurrent := func() []*privatev1.AddOnOperatorReference {
+		result := make([]*privatev1.AddOnOperatorReference, len(currentOperators))
+		for i, ref := range currentOperators {
+			result[i] = cloneMessage(ref)
+		}
+		return result
+	}
+
+	if !updateIncludesField(mask, "spec.add_on_operators") || (mask == nil && len(candidateOperators) == 0) {
+		candidate.GetSpec().SetAddOnOperators(cloneCurrent())
+		return nil
+	}
+	if len(currentOperators) != len(candidateOperators) {
+		return grpcstatus.Errorf(
+			grpccodes.InvalidArgument,
+			"cannot change spec.add_on_operators: add-on operators are immutable",
+		)
+	}
+
+	for i, ref := range candidateOperators {
+		stored := currentOperators[i]
+		if err := validateImmutableReferenceIdentity(
+			stored, ref, fmt.Sprintf("spec.add_on_operators[%d]", i), "add-on operators", true,
+		); err != nil {
+			return err
+		}
+	}
+	candidate.GetSpec().SetAddOnOperators(cloneCurrent())
 	return nil
 }
 
@@ -937,10 +1080,8 @@ func (s *PrivateClustersServer) validateNetworkAttachmentState(ctx context.Conte
 		}
 		return err
 	}
-	if subnet.GetStatus().GetState() != privatev1.SubnetState_SUBNET_STATE_READY {
-		return grpcstatus.Errorf(grpccodes.FailedPrecondition,
-			"spec.network_attachment: subnet '%s' is not in READY state (current state: %s)",
-			subnetKey, subnet.GetStatus().GetState().String())
+	if err := validateResolvedSubnetReady(subnet, subnetKey, " in spec.network_attachment"); err != nil {
+		return err
 	}
 
 	virtualNetworkID := refKey(subnet.GetSpec().GetVirtualNetwork())
@@ -949,6 +1090,7 @@ func (s *PrivateClustersServer) validateNetworkAttachmentState(ctx context.Conte
 			"spec.network_attachment: subnet '%s' has no virtual network reference", subnetKey)
 	}
 
+	// Use the subnet's VirtualNetwork as the expected owner for every SecurityGroup.
 	for i, sgRef := range att.GetSecurityGroups() {
 		sgKey := refKey(sgRef)
 		if sgKey == "" {
@@ -965,18 +1107,9 @@ func (s *PrivateClustersServer) validateNetworkAttachmentState(ctx context.Conte
 			}
 			return err
 		}
-		if sg.GetStatus().GetState() != privatev1.SecurityGroupState_SECURITY_GROUP_STATE_READY {
-			return grpcstatus.Errorf(grpccodes.FailedPrecondition,
-				"spec.network_attachment.security_groups[%d]: security group '%s' is not in READY state (current state: %s)",
-				i, sgKey, sg.GetStatus().GetState().String())
-		}
-
-		sgVirtualNetworkID := refKey(sg.GetSpec().GetVirtualNetwork())
-		if sgVirtualNetworkID != virtualNetworkID {
-			return grpcstatus.Errorf(grpccodes.InvalidArgument,
-				"spec.network_attachment.security_groups[%d]: security group '%s' belongs to VirtualNetwork '%s', "+
-					"but subnet '%s' belongs to VirtualNetwork '%s'",
-				i, sgKey, sgVirtualNetworkID, subnetKey, virtualNetworkID)
+		if err := validateResolvedSecurityGroup(sg, sgKey,
+			fmt.Sprintf(" in spec.network_attachment.security_groups[%d]", i), virtualNetworkID); err != nil {
+			return err
 		}
 	}
 
@@ -1022,21 +1155,23 @@ func (s *PrivateClustersServer) resolveFabricInterfaces(ctx context.Context, spe
 		if hostType == nil {
 			continue
 		}
-		fabricInterface := ""
-		for _, ni := range hostType.GetInterfaces() {
-			if strings.EqualFold(ni.GetRole(), "fabric") {
-				fabricInterface = ni.GetName()
-				break
-			}
-		}
-		if fabricInterface == "" {
+		fabricInterface, err := selectClusterFabricInterface(hostType)
+		if err != nil {
 			return grpcstatus.Errorf(grpccodes.FailedPrecondition,
-				"node_sets[%s]: host type '%s' has no interface with role 'fabric'",
-				name, hostTypeKey)
+				"node_sets[%s]: %s", name, err)
 		}
 		nodeSet.SetFabricInterface(fabricInterface)
 	}
 	return nil
+}
+
+func selectClusterFabricInterface(hostType *privatev1.HostType) (string, error) {
+	for _, networkInterface := range hostType.GetInterfaces() {
+		if strings.EqualFold(networkInterface.GetRole(), "fabric") {
+			return networkInterface.GetName(), nil
+		}
+	}
+	return "", fmt.Errorf("host type '%s' has no interface with role 'fabric'", hostType.GetId())
 }
 
 // autoProvisionExternalIPs creates two ExternalIPs and two ExternalIPAttachments
@@ -1207,6 +1342,11 @@ func (s *PrivateClustersServer) resolveClusterNodeSets(ctx context.Context, clus
 	if useTemplateMap {
 		nodes = convertTemplateNodeSets(template.GetNodeSets())
 	}
+	// An existing Template may contain no node sets. Keep the Cluster map empty so the
+	// infrastructure provider can choose node placement.
+	if len(nodes) == 0 && len(template.GetNodeSets()) == 0 {
+		return nil
+	}
 	for name, node := range nodes {
 		if node == nil {
 			return grpcstatus.Errorf(grpccodes.InvalidArgument, "node set '%s' is required", name)
@@ -1236,18 +1376,15 @@ func (s *PrivateClustersServer) resolveClusterNodeSets(ctx context.Context, clus
 		if host == nil {
 			return grpcstatus.Errorf(grpccodes.InvalidArgument, "host type for node set '%s' is required", name)
 		}
-		if !node.HasSize() {
-			return grpcstatus.Errorf(grpccodes.InvalidArgument, "size for node set '%s' is required", name)
-		}
-		if node.GetSize() <= 0 {
-			return grpcstatus.Errorf(grpccodes.InvalidArgument, "size for node set '%s' should be greater than zero, but it is %d", name, node.GetSize())
-		}
 		node.SetHostType(privatev1.HostTypeReference_builder{
 			Id: host.GetId(), Name: host.GetMetadata().GetName(),
 			Shared: host.GetMetadata().GetTenant() == auth.SharedTenant, Project: host.GetMetadata().GetProject(),
 		}.Build())
 	}
 	cluster.GetSpec().SetNodeSets(nodes)
+	if err := validateClusterNodeSetMap(nodes); err != nil {
+		return grpcstatus.Error(grpccodes.InvalidArgument, err.Error())
+	}
 	return nil
 }
 

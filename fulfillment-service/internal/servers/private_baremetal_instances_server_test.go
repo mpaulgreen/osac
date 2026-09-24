@@ -609,6 +609,7 @@ var _ = Describe("Private bare metal instances server", func() {
 					Name:   fmt.Sprintf("userdata-%s", uuid.NewString()[:8]),
 					Tenant: testTenant,
 				}.Build(),
+				Type: privatev1.SecretType_SECRET_TYPE_USER_DATA,
 				Data: map[string][]byte{userDataSecretDataKey: []byte("#cloud-config")},
 			}.Build()).Do(ctx)
 			Expect(err).ToNot(HaveOccurred())
@@ -732,6 +733,7 @@ var _ = Describe("Private bare metal instances server", func() {
 					Name:   fmt.Sprintf("userdata-%s", uuid.NewString()[:8]),
 					Tenant: testTenant,
 				}.Build(),
+				Type: privatev1.SecretType_SECRET_TYPE_USER_DATA,
 				Data: map[string][]byte{userDataSecretDataKey: []byte("#cloud-config")},
 			}.Build()).Do(ctx)
 			Expect(err).ToNot(HaveOccurred())
@@ -1777,8 +1779,7 @@ var _ = Describe("Private bare metal instances server", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			// Create subnets with a full NC → VN → Subnet chain so that both the
-			// check_bmi_subnet_refs DB trigger and validateNetworkAttachmentsRequireFabricManager
-			// are satisfied.
+			// check_bmi_subnet_refs DB trigger and the fabric-manager validation are satisfied.
 			ncDao, err := dao.NewGenericDAO[*privatev1.NetworkClass]().
 				SetLogger(logger).
 				SetTenancyLogic(tenancy).
@@ -2783,6 +2784,33 @@ var _ = Describe("Private bare metal instances server", func() {
 				}.Build(),
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("preserves compatibility when fabric dependencies are missing", func() {
+			missingVirtualNetwork := privatev1.Subnet_builder{
+				Id: "subnet-with-missing-vn",
+				Spec: privatev1.SubnetSpec_builder{
+					VirtualNetwork: privatev1.VirtualNetworkLocalReference_builder{Id: "missing-vn"}.Build(),
+				}.Build(),
+			}.Build()
+			Expect(validateBareMetalSubnetFabricManager(ctx, missingVirtualNetwork, "network_attachments[0]",
+				vnDao, networkClassDao, logger)).To(Succeed())
+
+			vnResp, err := vnDao.Create().SetObject(privatev1.VirtualNetwork_builder{
+				Metadata: privatev1.Metadata_builder{Tenant: testTenant, Name: uuid.NewString()}.Build(),
+				Spec: privatev1.VirtualNetworkSpec_builder{
+					NetworkClass: privatev1.NetworkClassReference_builder{Id: "missing-network-class"}.Build(),
+				}.Build(),
+			}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			missingNetworkClass := privatev1.Subnet_builder{
+				Id: "subnet-with-missing-network-class",
+				Spec: privatev1.SubnetSpec_builder{
+					VirtualNetwork: privatev1.VirtualNetworkLocalReference_builder{Id: vnResp.GetObject().GetId()}.Build(),
+				}.Build(),
+			}.Build()
+			Expect(validateBareMetalSubnetFabricManager(ctx, missingNetworkClass, "network_attachments[0]",
+				vnDao, networkClassDao, logger)).To(Succeed())
 		})
 
 		DescribeTable("validates resolved attachment dependencies", func(subnetReady, groupReady, sameNetwork bool, code grpccodes.Code, message string) {

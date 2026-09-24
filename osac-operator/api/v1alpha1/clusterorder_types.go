@@ -25,6 +25,7 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // ClusterOrderSpec defines the desired state of ClusterOrder
+// +kubebuilder:validation:XValidation:rule="has(self.addOnOperators) == has(oldSelf.addOnOperators) && (!has(self.addOnOperators) || self.addOnOperators == oldSelf.addOnOperators)",message="addOnOperators is immutable"
 type ClusterOrderSpec struct {
 	// TemplateID is the unique identigier of the cluster template to use when creating this cluster
 	// +kubebuilder:validation:Required
@@ -41,6 +42,10 @@ type ClusterOrderSpec struct {
 	// defaults. The selected template may limit what node types you can request.
 	// +kubebuilder:validation:Optional
 	NodeRequests []NodeRequest `json:"nodeRequests,omitempty"`
+	// AddOnOperators lists the stable names of operators requested for the cluster.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxItems=32
+	AddOnOperators []string `json:"addOnOperators,omitempty"`
 
 	// PullSecret contains credentials for authenticating to container image repositories.
 	// If not provided, the provider's default pull secret is used.
@@ -170,6 +175,60 @@ type ClusterOrderClusterReferenceType struct {
 	RoleBindingName    string `json:"roleBindingName"`
 }
 
+// WorkerStatus tracks the provisioning state of a single bare-metal worker
+// within a ClusterOrder, enabling failure handling and retry logic.
+type WorkerStatus struct {
+	// WorkerID is a stable identifier for this worker slot (e.g. "worker-0",
+	// "worker-1"). It is assigned when the worker entry is created and never
+	// changes, even when the underlying BareMetalInstance is replaced. This
+	// stability makes it safe to use as the list-map key so that BMI
+	// replacements update the existing entry instead of orphaning it.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	WorkerID string `json:"workerID"`
+
+	// BMIName is the name of the BareMetalInstance CR for this worker.
+	// +kubebuilder:validation:Optional
+	BMIName string `json:"bmiName,omitempty"`
+
+	// BMINamespace is the namespace of the BareMetalInstance CR.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	BMINamespace string `json:"bmiNamespace"`
+
+	// AttemptCount tracks how many provisioning attempts have been made
+	// for this worker slot. Transient gRPC errors do not increment this counter.
+	// +kubebuilder:validation:Optional
+	AttemptCount int `json:"attemptCount,omitempty"`
+
+	// NextRetryTime is the earliest time at which the next retry may be attempted,
+	// computed from the escalating backoff schedule.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	NextRetryTime *metav1.Time `json:"nextRetryTime,omitempty"`
+
+	// LastFailureReason is a machine-readable reason for the most recent failure.
+	// +kubebuilder:validation:Optional
+	LastFailureReason string `json:"lastFailureReason,omitempty"`
+
+	// LastFailureTime is the timestamp of the most recent failure.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	LastFailureTime *metav1.Time `json:"lastFailureTime,omitempty"`
+
+	// AttemptStartTime records when the current provisioning attempt was first
+	// observed. This is set on the first reconciliation of a new or replaced
+	// worker to anchor the agent-registration timeout. Once a replacement is
+	// triggered (which sets NextRetryTime), this field is cleared because the
+	// replacement's NextRetryTime becomes the new timeout anchor.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	AttemptStartTime *metav1.Time `json:"attemptStartTime,omitempty"`
+}
+
 // ClusterOrderStatus defines the observed state of ClusterOrder
 type ClusterOrderStatus struct {
 	// Phase provides a single-value overview of the state of the ClusterOrder
@@ -220,6 +279,13 @@ type ClusterOrderStatus struct {
 	// +listType=map
 	// +listMapKey=name
 	NodeSets []NodeSetStatus `json:"nodeSets,omitempty"`
+
+	// Workers tracks per-worker provisioning state for failure handling and retry.
+	// Each entry corresponds to a bare-metal worker slot in the cluster.
+	// +kubebuilder:validation:Optional
+	// +listType=map
+	// +listMapKey=workerID
+	Workers []WorkerStatus `json:"workers,omitempty"`
 }
 
 // NodeSetStatus holds networking status for a single node set.

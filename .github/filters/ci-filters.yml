@@ -158,6 +158,7 @@ e2e-code:
   - '!**/it/**'
   - '!**/conftest.py'
   - '!**/fixtures/**'
+  - '!tools/pr-notify/**'
 e2e-suite:
   - 'tests/e2e/**'
 
@@ -220,6 +221,7 @@ vmaas-outside-known-safe:
   - '!tests/e2e/caas/**'
   - '!tests/e2e/bmaas/**'
   - '!tests/e2e/references/test_cluster_baremetal_references.py'
+  - '!tools/pr-notify/**'
 caas-outside-known-safe:
   - '**'
   - '!**/*.md'
@@ -234,6 +236,7 @@ caas-outside-known-safe:
   - '!.pre-commit-config.yaml'
   - '!tests/e2e/vmaas/**'
   - '!tests/e2e/bmaas/**'
+  - '!tools/pr-notify/**'
 bmaas-outside-known-safe:
   - '**'
   - '!**/*.md'
@@ -248,6 +251,7 @@ bmaas-outside-known-safe:
   - '!.pre-commit-config.yaml'
   - '!tests/e2e/vmaas/**'
   - '!tests/e2e/caas/**'
+  - '!tools/pr-notify/**'
 
 # --- Every other required-check job category (deterministic-only, no AI) --
 # Mirrors -- as closely as each real workflow's own filter allows -- the
@@ -280,6 +284,7 @@ code:
   - '!.skillsaw.yaml'
   - '!.pre-commit-config.yaml'
   - '!osac-ui/**'
+  - '!tools/pr-notify/**'
 
 # unit-tests.yml's own `ui` filter -- gates run-osac-ui-tests, which `code`
 # above deliberately excludes.
@@ -392,3 +397,10 @@ integration-tests-bare-metal-fulfillment-operator:
   - '{bare-metal-fulfillment-operator/**,osac-operator/**,proto/**,osac-installer/**,go.work,go.work.sum,.github/workflows/integration-tests.yml}'
 integration-tests-osac-aap:
   - '{osac-aap/**,.github/workflows/integration-tests.yml}'
+
+# Claude/Codex component-hook smoke coverage. Keep this scoped to the shared
+# component hooks, their registrations, the Codex adapter, and the smoke test
+# itself. The workflow and filter are included so edits to the CI wiring are
+# exercised too.
+component-hooks-smoke:
+  - '{.claude/settings.json,.claude/hooks/component-*.sh,.codex/hooks.json,.codex/hooks/**,tools/test/component-hooks-smoke.sh,.github/filters/ci-filters.yml,.github/workflows/component-hooks-smoke.yml}'

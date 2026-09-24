@@ -374,6 +374,12 @@ func (s *PrivateComputeInstancesServer) prepareCreate(ctx context.Context, candi
 	if err != nil {
 		return
 	}
+	if key := spec.GetSshPublicKey(); key != "" {
+		if err = validateOpenSSHPublicKey(key); err != nil {
+			err = grpcstatus.Errorf(grpccodes.InvalidArgument, "spec.ssh_public_key: %s", err)
+			return
+		}
+	}
 	if err = s.validateAndResolveUserDataSecret(ctx, spec, true); err != nil {
 		return
 	}
@@ -452,7 +458,29 @@ func (s *PrivateComputeInstancesServer) resolveCreationSource(ctx context.Contex
 
 func (s *PrivateComputeInstancesServer) Update(ctx context.Context,
 	request *privatev1.ComputeInstancesUpdateRequest) (response *privatev1.ComputeInstancesUpdateResponse, err error) {
+	computeInstance := request.GetObject()
+	if computeInstance == nil {
+		err = grpcstatus.Errorf(grpccodes.InvalidArgument, "compute instance is mandatory")
+		return
+	}
+	if computeInstance.GetId() == "" {
+		err = grpcstatus.Errorf(grpccodes.InvalidArgument, "compute instance id is mandatory")
+		return
+	}
+
+	var warnings []string
+	var resizeNoOp bool
 	err = s.generic.UpdateWithCandidatePreparation(ctx, request, &response, func(ctx context.Context, current, candidate *privatev1.ComputeInstance) error {
+		if updateIncludesField(request.GetUpdateMask(), "spec.instance_type") {
+			warnings, resizeNoOp, err = s.validateInstanceTypeResize(ctx, current, candidate)
+			if err != nil {
+				return err
+			}
+		}
+		if resizeNoOp && onlyInstanceTypeMask(request.GetUpdateMask()) {
+			candidate.GetSpec().SetInstanceType(current.GetSpec().GetInstanceType())
+			return nil
+		}
 		if err := validateComputeInstanceImmutability(current, candidate, request.GetUpdateMask()); err != nil {
 			return err
 		}
@@ -462,6 +490,13 @@ func (s *PrivateComputeInstancesServer) Update(ctx context.Context,
 			updateIncludesField(request.GetUpdateMask(), "spec.user_data_secret"),
 		); err != nil {
 			return err
+		}
+		if updateIncludesField(request.GetUpdateMask(), "spec.ssh_public_key") {
+			if key := candidate.GetSpec().GetSshPublicKey(); key != "" {
+				if err := validateOpenSSHPublicKey(key); err != nil {
+					return grpcstatus.Errorf(grpccodes.InvalidArgument, "spec.ssh_public_key: %s", err)
+				}
+			}
 		}
 		if updateIncludesField(request.GetUpdateMask(), "spec.network_attachments") {
 			// During deletion, keep the existing visibility check without requiring dependencies
@@ -473,7 +508,26 @@ func (s *PrivateComputeInstancesServer) Update(ctx context.Context,
 		}
 		return nil
 	})
+	if err != nil {
+		return
+	}
+	if len(warnings) > 0 {
+		response.SetWarnings(warnings)
+	}
 	return
+}
+
+func onlyInstanceTypeMask(mask *fieldmaskpb.FieldMask) bool {
+	paths := mask.GetPaths()
+	if len(paths) == 0 {
+		return false
+	}
+	for _, path := range paths {
+		if path != "spec.instance_type" {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *PrivateComputeInstancesServer) validateAndResolveUserDataSecret(
@@ -577,6 +631,59 @@ func (s *PrivateComputeInstancesServer) validateInstanceType(
 	return validateResolvedInstanceType(resolved, identifier, "")
 }
 
+func (s *PrivateComputeInstancesServer) validateInstanceTypeResize(
+	ctx context.Context,
+	current, candidate *privatev1.ComputeInstance,
+) (warnings []string, noOp bool, err error) {
+	currentRef := current.GetSpec().GetInstanceType()
+	targetRef := candidate.GetSpec().GetInstanceType()
+	if currentRef == nil || targetRef == nil {
+		return nil, false, grpcstatus.Errorf(grpccodes.InvalidArgument, "instance type is mandatory")
+	}
+	targetName := refKey(targetRef)
+	currentType, err := resolveAndCanonicalizeReference(
+		ctx, s.instanceTypesDao, current.GetMetadata(), currentRef, "instance type", grpccodes.NotFound,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	targetType, err := resolveAndCanonicalizeReference(
+		ctx, s.instanceTypesDao, current.GetMetadata(), targetRef, "instance type", grpccodes.NotFound,
+	)
+	if err != nil {
+		if grpcstatus.Code(err) == grpccodes.NotFound {
+			return nil, false, grpcstatus.Errorf(
+				grpccodes.InvalidArgument,
+				"instance type '%s' not found",
+				targetName,
+			)
+		}
+		return nil, false, err
+	}
+	if currentType.GetId() == targetType.GetId() {
+		return nil, true, nil
+	}
+
+	targetName = targetType.GetMetadata().GetName()
+	warnings, err = validateResolvedInstanceType(targetType, targetName, "")
+	if err != nil {
+		return nil, false, err
+	}
+	if !proto.Equal(
+		currentType.GetSpec().GetGpu(),
+		targetType.GetSpec().GetGpu(),
+	) {
+		return nil, false, grpcstatus.Errorf(
+			grpccodes.FailedPrecondition,
+			"cannot change GPU configuration when resizing from instance type '%s' to '%s'",
+			currentType.GetMetadata().GetName(),
+			targetName,
+		)
+	}
+
+	return warnings, false, nil
+}
+
 // validateDiskImage checks the image selected by the caller, Catalog policy, or Template and
 // stores its actual ID/name/scope. Deprecated images produce a warning; obsolete ones fail.
 func (s *PrivateComputeInstancesServer) validateDiskImage(
@@ -628,12 +735,11 @@ func validateComputeTemplateImmutability(
 	updatingTemplate := updateIncludesField(updateMask, "spec.template")
 	updatingTemplateParams := updateIncludesField(updateMask, "spec.template_parameters")
 	updatingCatalogItem := updateIncludesField(updateMask, "spec.catalog_item")
-	updatingInstanceType := updateIncludesField(updateMask, "spec.instance_type")
 	updatingDiskImage := updateIncludesField(updateMask, "spec.disk_image")
 	updatingAutoExternalIP := updateIncludesField(updateMask, "spec.auto_external_ip_attachment")
 	updatingUserDataSecret := updateIncludesField(updateMask, "spec.user_data_secret")
 
-	if !updatingTemplate && !updatingTemplateParams && !updatingCatalogItem && !updatingInstanceType &&
+	if !updatingTemplate && !updatingTemplateParams && !updatingCatalogItem &&
 		!updatingDiskImage && !updatingAutoExternalIP && !updatingUserDataSecret {
 		return nil
 	}
@@ -668,15 +774,6 @@ func validateComputeTemplateImmutability(
 			return err
 		}
 		newSpec.SetCatalogItem(ref)
-	}
-
-	if updatingInstanceType && refKey(existingSpec.GetInstanceType()) != refKey(newSpec.GetInstanceType()) {
-		return grpcstatus.Errorf(
-			grpccodes.InvalidArgument,
-			"cannot change spec.instance_type from '%s' to '%s': instance type is immutable",
-			refKey(existingSpec.GetInstanceType()),
-			refKey(newSpec.GetInstanceType()),
-		)
 	}
 
 	if updatingDiskImage && refKey(existingSpec.GetDiskImage()) != refKey(newSpec.GetDiskImage()) {
@@ -969,15 +1066,15 @@ func (s *PrivateComputeInstancesServer) validateNetworkReferencesState(
 			return err
 		}
 
+		source := fmt.Sprintf(" in network_attachments[%d]", i)
 		// VAL-02: Validate READY state
-		if subnet.GetStatus().GetState() != privatev1.SubnetState_SUBNET_STATE_READY {
-			return grpcstatus.Errorf(grpccodes.FailedPrecondition,
-				"network_attachments[%d]: subnet '%s' is not in READY state (current state: %s)",
-				i, subnetKey, subnet.GetStatus().GetState().String())
+		if err := validateResolvedSubnetReady(subnet, subnetKey, source); err != nil {
+			return err
 		}
 
 		virtualNetworkID := refKey(subnet.GetSpec().GetVirtualNetwork())
 
+		// Use the subnet's VirtualNetwork as the expected owner for every SecurityGroup.
 		for _, sgRef := range securityGroupRefs {
 			if sgRef == nil {
 				continue
@@ -995,20 +1092,9 @@ func (s *PrivateComputeInstancesServer) validateNetworkReferencesState(
 			}
 
 			// VAL-02: Validate READY state
-			if sg.GetStatus().GetState() != privatev1.SecurityGroupState_SECURITY_GROUP_STATE_READY {
-				return grpcstatus.Errorf(grpccodes.FailedPrecondition,
-					"network_attachments[%d]: security group '%s' is not in READY state (current state: %s)",
-					i, sgKey, sg.GetStatus().GetState().String())
-			}
-
 			// VAL-03: Validate SecurityGroup belongs to same VirtualNetwork as Subnet
-			if virtualNetworkID != "" {
-				sgVirtualNetworkID := refKey(sg.GetSpec().GetVirtualNetwork())
-				if sgVirtualNetworkID != virtualNetworkID {
-					return grpcstatus.Errorf(grpccodes.InvalidArgument,
-						"network_attachments[%d]: security group '%s' belongs to VirtualNetwork '%s', but subnet '%s' belongs to VirtualNetwork '%s'",
-						i, sgKey, sgVirtualNetworkID, subnetKey, virtualNetworkID)
-				}
+			if err := validateResolvedSecurityGroup(sg, sgKey, source, virtualNetworkID); err != nil {
+				return err
 			}
 		}
 	}
